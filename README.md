@@ -1,36 +1,74 @@
 # Hermes Pixel Assistant POC
 
-A deliberately minimal native Android proof of concept for the public Android `ROLE_ASSISTANT` / `VoiceInteractionService` interface.
+A native Kotlin Android proof of concept for a personal [Hermes Agent](https://github.com/NousResearch/hermes-agent) voice client. It can be selected as Android's default digital assistant and uses the platform speech services plus Hermes' Runs API.
 
-## Behavior
+> **Status:** Experimental, debug-signed POC. It is intended for a private Tailnet deployment, not a public production service.
 
-Once selected as Android's default digital assistant, invoking it from the Power button or assist gesture shows an overlay and speaks exactly:
+## What works
+
+- Android `ROLE_ASSISTANT`, `VoiceInteractionService`, and a bottom-anchored assistant overlay
+- Android/GMS `SpeechRecognizer` with live partial transcription and waveform animation
+- A fallback for recognizers that emit a usable partial result followed by `ERROR_NO_MATCH`
+- Hermes Runs API client: `POST /v1/runs` plus SSE consumption from `/v1/runs/{run_id}/events`
+- Streaming response text and final Android `TextToSpeech` output
+- First-run configuration for Tailnet host, port, and bearer API key
+- API key storage encrypted with an Android Keystore AES-GCM key
+- Dismiss with a downward swipe or a tap outside the widget; an already accepted Hermes run is deliberately not cancelled
+
+## Architecture
 
 ```text
-OK
+Android/GMS speech recognition
+        ↓
+Hermes Pixel Assistant (thin client)
+        ↓ private Tailnet
+Hermes API Server Runs API
+        ↓
+Hermes tools, memory, and configured model
+        ↓
+Android TextToSpeech
 ```
 
-It does **not** record audio, inspect the screen, call a network endpoint, retain conversations, or access Hermes yet.
+The app does not embed a server address or API key. Configure a private Hermes API Server in the launcher activity before invoking the assistant.
+
+## Build
+
+Requirements:
+
+- JDK 17
+- Android SDK platform 35 and build-tools 35.0.0
+
+```bash
+./gradlew :app:assembleDebug
+```
+
+The resulting APK is at:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
 
 ## Install and test
 
-1. Build the debug APK:
-   ```bash
-   ./gradlew :app:assembleDebug
-   ```
-2. Install `app/build/outputs/apk/debug/app-debug.apk` on the Pixel.
-3. Open **Hermes Assistant POC** and tap **Als Standard-Assistent auswählen**.
-4. Confirm the Android role dialog, then invoke the digital assistant by holding the power button or using the configured assist gesture.
-5. Expected result: an `OK` overlay and spoken `OK`.
+1. Install the debug APK on an Android device running API 29 or newer.
+2. Open **Hermes Assistant POC**.
+3. Allow microphone access.
+4. Enter the private Tailnet hostname/IP, port, and Hermes API bearer token.
+5. Select **Save and test connection**.
+6. Tap **Select as default assistant** and confirm the Android role dialog.
+7. Invoke Android's assistant gesture, speak a request, and wait for the streamed Hermes answer.
 
-## Intended next increments
+## Privacy and security
 
-1. Push-to-talk audio + VAD.
-2. Private STT endpoint over Tailscale.
-3. Hermes API Server streaming client.
-4. TTS endpoint and safe confirmation UI.
-5. Optional on-device microWakeWord.
+- The microphone transcript is sent to the configured Hermes API Server only after Android speech recognition completes.
+- The API key is encrypted at rest with Android Keystore; it is not shipped in the APK or logged by the app.
+- HTTP is allowed only for the intended encrypted Tailnet transport design. Do not expose such an endpoint publicly.
+- The current implementation does not request screen context.
 
-## Security posture
+## Next steps
 
-This POC has no network permission and no data path outside the device. Adding a Hermes connection later must use a device-bound credential, Tailscale-only transport, explicit screen-context consent, and an approval flow for privileged actions.
+- Persist active run IDs and provide resume/re-attach UX
+- Android completion notifications for runs that outlive the overlay
+- Explicit cancel action mapped to the Hermes Runs stop endpoint
+- Voice-specific intent guidance and richer user-safe progress states
+- Opt-in screen context and confirmation UI for side-effecting actions

@@ -11,8 +11,8 @@ android {
         applicationId = "de.danielkirs.hermesassistant"
         minSdk = 29
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.6.2"
+        versionCode = 15
+        versionName = "0.7.0"
     }
 
     compileOptions {

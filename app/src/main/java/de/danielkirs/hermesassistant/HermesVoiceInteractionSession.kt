@@ -70,6 +70,10 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var keyboardHeightPx = 0
     private var sheetKeyboardOffsetPx = 0
     private var desiredChatHeightPx = 0
+    private var historyOffset = 0
+    private var historyLoading = false
+    private var historyExhausted = false
+    private val deferredHistory = ArrayDeque<HermesHistoryMessage>()
     private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val surfaceColor = Color.rgb(20, 24, 34)
@@ -139,6 +143,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 isFillViewport = true
                 visibility = View.GONE
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                    if (scrollY <= dp(32)) loadOlderHistoryPage()
+                }
             }
             messages = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -264,6 +271,10 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         steeringPending = null
         pendingMessages.clear()
         desiredChatHeightPx = 0
+        historyOffset = 0
+        historyLoading = false
+        historyExhausted = false
+        deferredHistory.clear()
         transcript.text = ""
         transcript.visibility = View.VISIBLE
         messages.removeAllViews()
@@ -271,6 +282,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         waveform.setLevel(0f)
         textToSpeech.stop()
         startRecognition()
+        loadHistoryPage(initial = true)
     }
 
     private fun startRecognition(continueInitialWindow: Boolean = false) {
@@ -564,6 +576,101 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         animateMessageEntry(wrapper, fromRight = false)
         scrollMessagesToBottom()
         return body
+    }
+
+    private fun loadOlderHistoryPage() {
+        if (deferredHistory.isNotEmpty()) {
+            val deferred = deferredHistory.toList()
+            deferredHistory.clear()
+            prependHistory(deferred, scrollToBottom = false)
+            return
+        }
+        loadHistoryPage(initial = false)
+    }
+
+    private fun loadHistoryPage(initial: Boolean) {
+        if (historyLoading || historyExhausted) return
+        val connection = connectionStore.load() ?: return
+        historyLoading = true
+        HermesRunClient(connection).loadHistory(limit = 60, offset = historyOffset) { history, returned, error ->
+            postToUi {
+                historyLoading = false
+                if (error != null) return@postToUi
+                historyOffset += returned
+                if (returned < 60) historyExhausted = true
+                val visibleMessages = if (initial) {
+                    val initialVisible = history.takeLast(12)
+                    deferredHistory.addAll(history.dropLast(initialVisible.size))
+                    initialVisible
+                } else {
+                    history
+                }
+                if (visibleMessages.isEmpty()) return@postToUi
+                ensureChatVisible()
+                prependHistory(visibleMessages, scrollToBottom = initial)
+            }
+        }
+    }
+
+    private fun prependHistory(history: List<HermesHistoryMessage>, scrollToBottom: Boolean) {
+        val priorHeight = messages.height
+        val priorScroll = messageScroll.scrollY
+        for (message in history.asReversed()) {
+            val bubble = when (message.role) {
+                "user" -> createHistoryUserBubble(message.content)
+                "assistant" -> createHistoryAgentBubble(message.content)
+                else -> null
+            } ?: continue
+            messages.addView(bubble, 0, matchWidth(top = 8))
+        }
+        messages.post {
+            if (scrollToBottom) {
+                messageScroll.fullScroll(View.FOCUS_DOWN)
+            } else {
+                messageScroll.scrollTo(0, (messages.height - priorHeight + priorScroll).coerceAtLeast(0))
+            }
+        }
+    }
+
+    private fun createHistoryUserBubble(text: String): View {
+        val body = TextView(context).apply {
+            this.text = text
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setLineSpacing(dp(2).toFloat(), 1f)
+            background = roundedBackground(userBubbleColor, dp(22))
+            setPadding(dp(15), dp(10), dp(15), dp(10))
+        }
+        return FrameLayout(context).apply {
+            addView(body, FrameLayout.LayoutParams(
+                (context.resources.displayMetrics.widthPixels * 0.72f).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END
+            ))
+        }
+    }
+
+    private fun createHistoryAgentBubble(text: String): View {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(context).apply {
+                this.text = "✦  Hermes"
+                setTextColor(accentColor)
+                textSize = 12f
+                setPadding(dp(12), 0, 0, dp(4))
+            })
+            addView(TextView(context).apply {
+                this.text = text
+                setTextColor(primaryText)
+                textSize = 16f
+                setLineSpacing(dp(2).toFloat(), 1f)
+                background = roundedBackground(surfaceContainerColor, dp(22))
+                setPadding(dp(15), dp(11), dp(15), dp(11))
+            }, LinearLayout.LayoutParams(
+                (context.resources.displayMetrics.widthPixels * 0.80f).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
     }
 
     private fun installKeyboardAwareLayout() {

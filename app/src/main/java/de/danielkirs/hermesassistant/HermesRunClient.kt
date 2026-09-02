@@ -13,6 +13,8 @@ interface HermesRunListener {
     fun onFailed(message: String)
 }
 
+data class HermesHistoryMessage(val role: String, val content: String)
+
 /**
  * A run is owned by Hermes once POST /v1/runs returns. This client may stop
  * reading SSE when the assistant overlay is dismissed without stopping that
@@ -56,6 +58,46 @@ class HermesRunClient(private val connection: HermesConnection) {
             }
         }.apply {
             name = "HermesSteer"
+            start()
+        }
+    }
+
+    fun loadHistory(
+        limit: Int,
+        offset: Int,
+        callback: (messages: List<HermesHistoryMessage>, returned: Int, error: String?) -> Unit
+    ) {
+        Thread {
+            try {
+                val request = openConnection(
+                    "/api/sessions/${connection.conversationId}/messages?limit=$limit&offset=$offset&order=latest",
+                    "GET"
+                )
+                val code = request.responseCode
+                val response = readBody(request, code)
+                request.disconnect()
+                if (code !in 200..299) {
+                    callback(emptyList(), 0, "Verlauf konnte nicht geladen werden")
+                    return@Thread
+                }
+                val payload = JSONObject(response)
+                val data = payload.optJSONArray("data")
+                val messages = buildList {
+                    for (index in 0 until (data?.length() ?: 0)) {
+                        val item = data?.optJSONObject(index) ?: continue
+                        val role = item.optString("role")
+                        val content = item.optString("content").trim()
+                        if (role in setOf("user", "assistant") && content.isNotEmpty()) {
+                            add(HermesHistoryMessage(role, content))
+                        }
+                    }
+                }
+                callback(messages, data?.length() ?: 0, null)
+            } catch (_: Exception) {
+                callback(emptyList(), 0, "Verlauf konnte nicht geladen werden")
+            }
+        }.apply {
+            name = "HermesHistory"
             start()
         }
     }

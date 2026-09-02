@@ -76,6 +76,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var initialListeningDeadlineMs = 0L
     private var recognitionStartedAtMs = 0L
     private var recognitionGeneration = 0
+    private var recognitionActive = false
+    private var recognitionRestartPending = false
     private var keyboardHeightPx = 0
     private var sheetKeyboardOffsetPx = 0
     private var desiredChatHeightPx = 0
@@ -326,6 +328,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         sheetPanel.animate().cancel()
         sheetPanel.translationY = 0f
         submitted = false
+        recognitionActive = false
+        recognitionRestartPending = false
         lastPartialText = ""
         pendingSpeech = null
         thinkingAnimator?.cancel()
@@ -358,15 +362,27 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     }
 
     private fun requestFreshRecognition() {
+        // Barge-in: never let the assistant's own TTS feed back into STT.
+        textToSpeech.stop()
+        pendingSpeech = null
+        if (recognitionActive || recognitionRestartPending) {
+            voiceLabel.text = "Ich höre bereits zu …"
+            showVoiceInputIndicator()
+            traceRecognition("manual-start-ignored:already-active")
+            return
+        }
+        recognitionRestartPending = true
         stopRecognition()
         hideInlineStatus()
         voiceLabel.text = "Ich höre zu"
         rootContainer.postDelayed({
+            recognitionRestartPending = false
             if (!submitted && !uiDismissed) startRecognition()
         }, 140)
     }
 
     private fun stopRecognition() {
+        recognitionActive = false
         recognitionGeneration += 1
         speechRecognizer?.let { recognizer ->
             try { recognizer.cancel() } catch (_: Exception) { }
@@ -378,17 +394,20 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private fun retryRecognitionWithinWindow(reason: String): Boolean {
         if (SystemClock.elapsedRealtime() >= initialListeningDeadlineMs || submitted || uiDismissed) return false
         traceRecognition("retry:$reason")
+        recognitionRestartPending = true
         voiceLabel.text = "Ich höre noch zu …"
         showVoiceInputIndicator()
         stopRecognition()
         rootContainer.postDelayed({
+            recognitionRestartPending = false
             if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
         }, 120)
         return true
     }
 
     private fun startRecognition(continueInitialWindow: Boolean = false) {
-        if (submitted) return
+        if (submitted || recognitionActive) return
+        recognitionRestartPending = false
         if (!continueInitialWindow) {
             initialListeningDeadlineMs = SystemClock.elapsedRealtime() + 10_000L
         }
@@ -433,7 +452,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 override fun onEndOfSpeech() {
                     if (generation != recognitionGeneration) return
                     traceRecognition("speech-end:began=$speechStarted partialChars=${lastPartialText.length}")
-                    if (speechStarted || lastPartialText.isNotBlank()) {
+                    if (lastPartialText.isNotBlank()) {
                         hideVoiceInputIndicator()
                         if (!uiDismissed && !submitted) showInlineStatus("Verarbeite Sprache …")
                     } else {
@@ -460,6 +479,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     traceRecognition("results:chars=${text?.length ?: 0}")
                     if (text == null) {
                         if (!retryRecognitionWithinWindow("empty-results")) {
+                            stopRecognition()
                             hideVoiceInputIndicator()
                             if (!uiDismissed) showInlineStatus("Ich habe nichts verstanden")
                         }
@@ -477,6 +497,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     } else if (retryableInitialError && retryRecognitionWithinWindow(recognitionErrorName(error))) {
                         // Retry scheduled within the still-active initial listening window.
                     } else {
+                        stopRecognition()
                         hideVoiceInputIndicator()
                         showInlineStatus(recognitionErrorText(error))
                     }
@@ -489,6 +510,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200)
             })
         }
+        recognitionActive = true
     }
 
     private fun submitTypedText() {

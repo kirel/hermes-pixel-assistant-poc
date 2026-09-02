@@ -73,6 +73,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var historyOffset = 0
     private var historyLoading = false
     private var historyExhausted = false
+    private var initialHistoryRendered = false
+    private var chatTouchedByUser = false
     private val deferredHistory = ArrayDeque<HermesHistoryMessage>()
     private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
@@ -143,8 +145,12 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 isFillViewport = true
                 visibility = View.GONE
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                setOnTouchListener { _, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) chatTouchedByUser = true
+                    false
+                }
                 setOnScrollChangeListener { _, _, scrollY, _, _ ->
-                    if (scrollY <= dp(32)) loadOlderHistoryPage()
+                    if (initialHistoryRendered && chatTouchedByUser && scrollY <= dp(32)) loadOlderHistoryPage()
                 }
             }
             messages = LinearLayout(context).apply {
@@ -274,6 +280,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         historyOffset = 0
         historyLoading = false
         historyExhausted = false
+        initialHistoryRendered = false
+        chatTouchedByUser = false
         deferredHistory.clear()
         transcript.text = ""
         transcript.visibility = View.VISIBLE
@@ -608,6 +616,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 if (visibleMessages.isEmpty()) return@postToUi
                 ensureChatVisible()
                 prependHistory(visibleMessages, scrollToBottom = initial)
+                if (initial) {
+                    rootContainer.postDelayed({
+                        if (!uiDismissed) {
+                            scrollMessagesToBottom()
+                            initialHistoryRendered = true
+                        }
+                    }, 320)
+                }
             }
         }
     }
@@ -770,7 +786,12 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     }
 
     private fun scrollMessagesToBottom() {
-        messageScroll.post { messageScroll.fullScroll(View.FOCUS_DOWN) }
+        messageScroll.post {
+            messageScroll.fullScroll(View.FOCUS_DOWN)
+            // The chat sheet itself can still be expanding when a message arrives.
+            // Repeat after that layout pass so new output never leaves the user at the top.
+            messageScroll.postDelayed({ messageScroll.fullScroll(View.FOCUS_DOWN) }, 260)
+        }
     }
 
     private fun postToUi(block: () -> Unit) {

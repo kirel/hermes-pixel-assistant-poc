@@ -1048,8 +1048,11 @@ private class MicrophoneButton(context: Context, private val fillColor: Int, pri
 
 private class WaveformView(context: Context) : View(context) {
     private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
         strokeCap = android.graphics.Paint.Cap.ROUND
+        strokeJoin = android.graphics.Paint.Join.ROUND
     }
+    private val path = android.graphics.Path()
     private var targetLevel = 0f
     private var displayedLevel = 0f
     private var accent = Color.rgb(208, 188, 255)
@@ -1066,20 +1069,61 @@ private class WaveformView(context: Context) : View(context) {
 
     override fun onDraw(canvas: android.graphics.Canvas) {
         super.onDraw(canvas)
-        val bars = 21
-        displayedLevel += (targetLevel - displayedLevel) * 0.22f
-        if (kotlin.math.abs(targetLevel - displayedLevel) > 0.01f) postInvalidateOnAnimation()
-        val gap = width / (bars * 2f)
+        if (width <= 0 || height <= 0) return
+
+        displayedLevel += (targetLevel - displayedLevel) * 0.18f
         val centerY = height / 2f
-        val baseHeight = height * 0.15f
-        for (index in 0 until bars) {
-            val distance = kotlin.math.abs(index - (bars - 1) / 2f) / ((bars - 1) / 2f)
-            val envelope = 1f - distance * 0.55f
-            val barHeight = baseHeight + displayedLevel * height * 0.76f * envelope
-            paint.color = Color.argb((150 + 105 * envelope).toInt(), Color.red(accent), Color.green(accent), Color.blue(accent))
-            paint.strokeWidth = gap * 0.72f
-            val x = gap + index * gap * 2f
-            canvas.drawLine(x, centerY - barHeight / 2f, x, centerY + barHeight / 2f, paint)
+        val phase = SystemClock.uptimeMillis() / 430f
+        val colors = intArrayOf(
+            Color.rgb(67, 214, 255),
+            Color.rgb(77, 231, 184),
+            Color.rgb(250, 220, 91),
+            Color.rgb(255, 139, 104),
+            Color.rgb(238, 101, 210),
+            accent,
+            Color.rgb(112, 139, 255)
+        )
+        paint.shader = android.graphics.LinearGradient(
+            0f,
+            0f,
+            width.toFloat(),
+            0f,
+            colors,
+            null,
+            android.graphics.Shader.TileMode.CLAMP
+        )
+
+        val frequencies = floatArrayOf(1.15f, 1.62f, 2.08f)
+        for (layer in frequencies.indices) {
+            val amplitude = height * (0.07f + displayedLevel * 0.32f) * (1f - layer * 0.16f)
+            buildWavePath(frequencies[layer], phase + layer * 1.7f, amplitude, centerY)
+
+            paint.alpha = 32 - layer * 6
+            paint.strokeWidth = height * (0.17f - layer * 0.025f)
+            canvas.drawPath(path, paint)
+
+            paint.alpha = 220 - layer * 38
+            paint.strokeWidth = height * (0.055f - layer * 0.008f)
+            canvas.drawPath(path, paint)
+        }
+        paint.shader = null
+        paint.alpha = 255
+
+        // Keep the layered waves gently flowing while the voice indicator is visible.
+        if (visibility == View.VISIBLE && isAttachedToWindow) postInvalidateOnAnimation()
+    }
+
+    private fun buildWavePath(frequency: Float, phase: Float, amplitude: Float, centerY: Float) {
+        path.reset()
+        var x = 0f
+        while (x <= width) {
+            val progress = x / width.toFloat()
+            val envelope = kotlin.math.sin(Math.PI * progress).toFloat().coerceAtLeast(0f)
+            val primary = kotlin.math.sin(progress * Math.PI.toFloat() * 2f * frequency + phase)
+            val detail = kotlin.math.sin(progress * Math.PI.toFloat() * 4f - phase * 0.72f) * 0.24f
+            val y = centerY + (primary + detail) * amplitude * envelope
+            if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
+            x += 3f
         }
     }
 }

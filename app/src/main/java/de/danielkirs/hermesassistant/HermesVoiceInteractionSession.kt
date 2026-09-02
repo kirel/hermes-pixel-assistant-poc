@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.SystemClock
 import android.service.voice.VoiceInteractionSession
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -58,6 +59,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var dragStartY = 0f
     private var dragStartTranslationY = 0f
     private var isDraggingSheet = false
+    private var initialListeningDeadlineMs = 0L
     private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val surfaceColor = Color.rgb(20, 24, 34)
@@ -242,8 +244,11 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         startRecognition()
     }
 
-    private fun startRecognition() {
+    private fun startRecognition(continueInitialWindow: Boolean = false) {
         if (submitted) return
+        if (!continueInitialWindow) {
+            initialListeningDeadlineMs = SystemClock.elapsedRealtime() + 6_000L
+        }
         val connection = connectionStore.load()
         when {
             connection == null -> {
@@ -263,7 +268,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val activeConnection = connection ?: return
         lastPartialText = ""
         transcript.text = ""
-        status.text = "Ich höre zu"
+        status.text = "Ich höre zu — lass dir Zeit"
         speechRecognizer?.destroy()
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
@@ -292,6 +297,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     if (submitted || uiDismissed) return
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) && lastPartialText.isNotBlank()) {
                         submitToHermes(lastPartialText, activeConnection, spoken = true)
+                    } else if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
+                        // Google recognizers may apply a very short initial-silence timeout.
+                        // Keep the listening window alive without making the user restart the gesture.
+                        status.text = "Ich höre noch zu …"
+                        speechRecognizer?.destroy()
+                        rootContainer.postDelayed({
+                            if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
+                        }, 90)
                     } else {
                         status.text = recognitionErrorText(error)
                     }

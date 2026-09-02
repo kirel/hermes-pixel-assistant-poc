@@ -5,6 +5,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.SystemClock
@@ -18,6 +19,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.ViewConfiguration
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -65,6 +67,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var isDraggingSheet = false
     private var initialListeningDeadlineMs = 0L
     private var recognitionGeneration = 0
+    private var keyboardHeightPx = 0
+    private var sheetKeyboardOffsetPx = 0
+    private var desiredChatHeightPx = 0
     private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val surfaceColor = Color.rgb(20, 24, 34)
@@ -93,6 +98,11 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 pendingSpeech = null
             }
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        window.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     }
 
     override fun onCreateContentView(): View {
@@ -161,6 +171,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 bottomMargin = dp(18)
             })
         }
+        rootContainer.post { installKeyboardAwareLayout() }
         return rootContainer
     }
 
@@ -252,6 +263,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         activeRunId = null
         steeringPending = null
         pendingMessages.clear()
+        desiredChatHeightPx = 0
         transcript.text = ""
         transcript.visibility = View.VISIBLE
         messages.removeAllViews()
@@ -554,9 +566,63 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         return body
     }
 
+    private fun installKeyboardAwareLayout() {
+        rootContainer.viewTreeObserver.addOnGlobalLayoutListener {
+            val visibleFrame = Rect()
+            rootContainer.getWindowVisibleDisplayFrame(visibleFrame)
+            val fullHeight = rootContainer.rootView.height
+            val frameInset = (fullHeight - visibleFrame.bottom).coerceAtLeast(0)
+            val resizedInset = (fullHeight - rootContainer.height).coerceAtLeast(0)
+            val keyboard = maxOf(frameInset, resizedInset).takeIf { it > dp(120) } ?: 0
+            val offset = if (resizedInset > dp(120)) 0 else keyboard
+            if (keyboard != keyboardHeightPx || offset != sheetKeyboardOffsetPx) {
+                keyboardHeightPx = keyboard
+                sheetKeyboardOffsetPx = offset
+                applyKeyboardLayout()
+            }
+        }
+    }
+
+    private fun applyKeyboardLayout() {
+        val sheetParams = sheetPanel.layoutParams as FrameLayout.LayoutParams
+        val targetMargin = dp(18) + sheetKeyboardOffsetPx
+        if (sheetParams.bottomMargin != targetMargin) {
+            sheetParams.bottomMargin = targetMargin
+            sheetPanel.layoutParams = sheetParams
+        }
+        if (messageScroll.visibility == View.VISIBLE) {
+            animateChatHeight(resolvedChatHeight())
+        }
+    }
+
+    private fun resolvedChatHeight(): Int {
+        if (desiredChatHeightPx == 0) return dp(220)
+        val fullHeight = rootContainer.rootView.height
+        val visibleHeight = if (keyboardHeightPx > 0) fullHeight - keyboardHeightPx else rootContainer.height
+        val chromeHeight = dp(198)
+        return desiredChatHeightPx.coerceAtMost(maxOf(dp(132), visibleHeight - chromeHeight))
+    }
+
+    private fun animateChatHeight(targetHeight: Int) {
+        val params = messageScroll.layoutParams as LinearLayout.LayoutParams
+        if (params.height == targetHeight) return
+        ValueAnimator.ofInt(params.height.coerceAtLeast(0), targetHeight).apply {
+            duration = 180
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                messageScroll.layoutParams = (messageScroll.layoutParams as LinearLayout.LayoutParams).apply {
+                    height = animation.animatedValue as Int
+                }
+                messageScroll.requestLayout()
+            }
+            start()
+        }
+    }
+
     private fun ensureChatVisible() {
         if (messageScroll.visibility == View.VISIBLE) return
-        val targetHeight = maxOf(dp(220), (context.resources.displayMetrics.heightPixels * 0.48f).toInt())
+        desiredChatHeightPx = maxOf(dp(220), (context.resources.displayMetrics.heightPixels * 0.48f).toInt())
+        val targetHeight = resolvedChatHeight()
         messageScroll.visibility = View.VISIBLE
         messageScroll.alpha = 0f
         messageScroll.translationY = dp(20).toFloat()

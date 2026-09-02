@@ -585,7 +585,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private fun applyKeyboardLayout() {
         val sheetParams = sheetPanel.layoutParams as FrameLayout.LayoutParams
-        val targetMargin = dp(18) + sheetKeyboardOffsetPx
+        val keyboardSafeGap = if (keyboardHeightPx > 0) dp(12) else 0
+        val targetMargin = dp(18) + sheetKeyboardOffsetPx + keyboardSafeGap
         if (sheetParams.bottomMargin != targetMargin) {
             sheetParams.bottomMargin = targetMargin
             sheetPanel.layoutParams = sheetParams
@@ -599,8 +600,11 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         if (desiredChatHeightPx == 0) return dp(220)
         val fullHeight = rootContainer.rootView.height
         val visibleHeight = if (keyboardHeightPx > 0) fullHeight - keyboardHeightPx else rootContainer.height
-        val chromeHeight = dp(198)
-        return desiredChatHeightPx.coerceAtMost(maxOf(dp(132), visibleHeight - chromeHeight))
+        // Measure the real non-scrollable sheet content (header, status, waveform and composer)
+        // instead of relying on a fixed estimate that changes with keyboard/vendor UI.
+        val fixedSheetContent = (sheetPanel.height - messageScroll.height).coerceAtLeast(dp(230))
+        val safeGap = if (keyboardHeightPx > 0) dp(20) else dp(8)
+        return desiredChatHeightPx.coerceAtMost(maxOf(dp(120), visibleHeight - fixedSheetContent - safeGap))
     }
 
     private fun animateChatHeight(targetHeight: Int) {

@@ -60,6 +60,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var dragStartTranslationY = 0f
     private var isDraggingSheet = false
     private var initialListeningDeadlineMs = 0L
+    private var recognitionGeneration = 0
     private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val surfaceColor = Color.rgb(20, 24, 34)
@@ -269,6 +270,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         lastPartialText = ""
         transcript.text = ""
         status.text = "Ich höre zu — lass dir Zeit"
+        val generation = ++recognitionGeneration
         speechRecognizer?.destroy()
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
@@ -276,17 +278,21 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 override fun onBeginningOfSpeech() = Unit
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
                 override fun onEndOfSpeech() {
+                    if (generation != recognitionGeneration) return
                     if (!uiDismissed && !submitted) status.text = "Verarbeite Sprache …"
                 }
                 override fun onRmsChanged(rmsdB: Float) {
+                    if (generation != recognitionGeneration) return
                     if (!uiDismissed) waveform.setLevel(((rmsdB + 2f) / 12f).coerceIn(0f, 1f))
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
+                    if (generation != recognitionGeneration) return
                     val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                     if (!text.isNullOrBlank()) lastPartialText = text
                     if (!uiDismissed && !text.isNullOrBlank()) transcript.text = text
                 }
                 override fun onResults(results: Bundle?) {
+                    if (generation != recognitionGeneration) return
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                         ?.ifBlank { null } ?: lastPartialText.ifBlank { null }
                     if (text == null) {
@@ -294,13 +300,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     } else submitToHermes(text, activeConnection, spoken = true)
                 }
                 override fun onError(error: Int) {
-                    if (submitted || uiDismissed) return
+                    if (generation != recognitionGeneration || submitted || uiDismissed) return
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) && lastPartialText.isNotBlank()) {
                         submitToHermes(lastPartialText, activeConnection, spoken = true)
                     } else if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
                         // Google recognizers may apply a very short initial-silence timeout.
                         // Keep the listening window alive without making the user restart the gesture.
                         status.text = "Ich höre noch zu …"
+                        recognitionGeneration += 1
                         speechRecognizer?.destroy()
                         rootContainer.postDelayed({
                             if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)

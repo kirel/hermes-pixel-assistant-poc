@@ -61,7 +61,7 @@ class MainActivity : Activity() {
             textSize = 14f
         }, layoutParams(28))
         hostInput = EditText(this).apply {
-            hint = "100.x.x.x oder dein-host.tailnet.ts.net"
+            hint = "100.x.x.x, Hostname oder Adresse:Port"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true)
             setText(savedConnection?.host.orEmpty())
@@ -124,11 +124,13 @@ class MainActivity : Activity() {
     }
 
     private fun saveConnection(testAfterSave: Boolean) {
-        val host = hostInput.text.toString().trim()
+        val endpoint = hostInput.text.toString().trim()
             .removePrefix("http://")
             .removePrefix("https://")
             .trimEnd('/')
-        val port = portInput.text.toString().toIntOrNull()
+        val parsedEndpoint = parseEndpoint(endpoint)
+        val host = parsedEndpoint.first
+        val port = parsedEndpoint.second ?: portInput.text.toString().toIntOrNull()
         val existing = connectionStore.load()
         val apiKey = apiKeyInput.text.toString().trim().ifBlank { existing?.apiKey.orEmpty() }
 
@@ -150,6 +152,23 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun parseEndpoint(value: String): Pair<String, Int?> {
+        if (value.startsWith("[")) {
+            val closingBracket = value.indexOf(']')
+            if (closingBracket > 0) {
+                val host = value.substring(0, closingBracket + 1)
+                val port = value.substring(closingBracket + 1).removePrefix(":").toIntOrNull()
+                return host to port
+            }
+        }
+        val separator = value.lastIndexOf(':')
+        if (separator > 0 && value.indexOf(':') == separator) {
+            val embeddedPort = value.substring(separator + 1).toIntOrNull()
+            if (embeddedPort != null) return value.substring(0, separator) to embeddedPort
+        }
+        return value to null
     }
 
     private fun requestAssistantRole() {

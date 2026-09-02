@@ -203,12 +203,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         }
         row.addView(composer, LinearLayout.LayoutParams(0, dp(48), 1f))
 
-        val voice = TextView(context).apply {
-            text = "⌁"
-            textSize = 26f
-            gravity = Gravity.CENTER
-            setTextColor(surfaceColor)
-            background = roundedBackground(accentColor, dp(22))
+        val voice = MicrophoneButton(context, accentColor, surfaceColor).apply {
             contentDescription = "Sprachaufnahme starten"
             setOnClickListener {
                 if (!submitted) startRecognition()
@@ -479,6 +474,44 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Android-Spracherkennung ist nicht erreichbar"
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Mikrofonzugriff fehlt"
         else -> "Spracherkennung fehlgeschlagen"
+    }
+}
+
+private class MicrophoneButton(context: Context, private val fillColor: Int, private val iconColor: Int) : View(context) {
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        super.onDraw(canvas)
+        val centerX = width / 2f
+        val centerY = height / 2f
+        paint.color = fillColor
+        canvas.drawCircle(centerX, centerY, minOf(width, height) * 0.46f, paint)
+
+        paint.color = iconColor
+        paint.style = android.graphics.Paint.Style.FILL
+        val capsuleWidth = width * 0.18f
+        val capsuleHeight = height * 0.34f
+        val capsule = android.graphics.RectF(
+            centerX - capsuleWidth / 2f,
+            centerY - capsuleHeight * 0.62f,
+            centerX + capsuleWidth / 2f,
+            centerY + capsuleHeight * 0.38f
+        )
+        canvas.drawRoundRect(capsule, capsuleWidth, capsuleWidth, paint)
+
+        paint.style = android.graphics.Paint.Style.STROKE
+        paint.strokeWidth = width * 0.055f
+        paint.strokeCap = android.graphics.Paint.Cap.ROUND
+        val arc = android.graphics.RectF(
+            centerX - width * 0.22f,
+            centerY - height * 0.10f,
+            centerX + width * 0.22f,
+            centerY + height * 0.26f
+        )
+        canvas.drawArc(arc, 0f, 180f, false, paint)
+        canvas.drawLine(centerX, centerY + height * 0.25f, centerX, centerY + height * 0.33f, paint)
+        canvas.drawLine(centerX - width * 0.11f, centerY + height * 0.33f, centerX + width * 0.11f, centerY + height * 0.33f, paint)
+        paint.style = android.graphics.Paint.Style.FILL
     }
 }
 

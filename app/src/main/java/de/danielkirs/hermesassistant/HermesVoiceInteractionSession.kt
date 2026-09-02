@@ -45,6 +45,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private val density = context.resources.displayMetrics.density
 
     private lateinit var status: TextView
+    private lateinit var voiceLabel: TextView
     private lateinit var transcript: TextView
     private lateinit var waveform: WaveformView
     private lateinit var voiceInputContainer: LinearLayout
@@ -57,6 +58,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private var activeAgentText: TextView? = null
     private var voiceIndicatorAnimator: ValueAnimator? = null
+    private var thinkingAnimator: ValueAnimator? = null
     private var activeRunId: String? = null
     private var steeringPending: PendingMessage? = null
     private val pendingMessages = ArrayDeque<PendingMessage>()
@@ -124,14 +126,6 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
             addView(createHeader(), matchWidth())
 
-            status = TextView(context).apply {
-                text = "Bereit"
-                setTextColor(primaryText)
-                textSize = 17f
-                gravity = Gravity.CENTER
-            }
-            addView(status, matchWidth(top = 6))
-
             messageScroll = ScrollView(context).apply {
                 isFillViewport = true
                 visibility = View.GONE
@@ -154,6 +148,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             ))
             addView(messageScroll, matchWidth(top = 6))
 
+            addView(createInlineStatus(), matchWidth(top = 6))
             addView(createVoiceInputIndicator(), matchWidth(height = 0, top = 6))
             addView(createComposer(), matchWidth(top = 8))
         }
@@ -225,6 +220,24 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         return header
     }
 
+    private fun createInlineStatus(): View {
+        status = TextView(context).apply {
+            setTextColor(secondaryText)
+            textSize = 13f
+            visibility = View.GONE
+            alpha = 0f
+            background = roundedBackground(surfaceContainerColor, dp(17))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        return FrameLayout(context).apply {
+            addView(status, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.START
+            ))
+        }
+    }
+
     private fun createVoiceInputIndicator(): View {
         voiceInputContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -234,12 +247,13 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             setPadding(dp(12), dp(8), dp(12), dp(8))
             background = roundedBackground(surfaceContainerColor, dp(18))
         }
-        voiceInputContainer.addView(TextView(context).apply {
+        voiceLabel = TextView(context).apply {
             text = "Ich höre zu"
             setTextColor(accentColor)
             textSize = 13f
             gravity = Gravity.CENTER
-        }, matchWidth())
+        }
+        voiceInputContainer.addView(voiceLabel, matchWidth())
         waveform = WaveformView(context).apply {
             contentDescription = "Audiopegel"
             setAccentColor(accentColor)
@@ -308,6 +322,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         submitted = false
         lastPartialText = ""
         pendingSpeech = null
+        thinkingAnimator?.cancel()
+        thinkingAnimator = null
         activeAgentText = null
         activeRunId = null
         steeringPending = null
@@ -319,6 +335,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         initialHistoryRendered = false
         chatTouchedByUser = false
         deferredHistory.clear()
+        status.animate().cancel()
+        status.visibility = View.GONE
+        status.alpha = 0f
         voiceIndicatorAnimator?.cancel()
         voiceInputContainer.visibility = View.GONE
         voiceInputContainer.alpha = 0f
@@ -334,7 +353,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private fun requestFreshRecognition() {
         stopRecognition()
-        status.text = "Bereit"
+        hideInlineStatus()
+        voiceLabel.text = "Ich höre zu"
         rootContainer.postDelayed({
             if (!submitted && !uiDismissed) startRecognition()
         }, 140)
@@ -352,20 +372,20 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private fun startRecognition(continueInitialWindow: Boolean = false) {
         if (submitted) return
         if (!continueInitialWindow) {
-            initialListeningDeadlineMs = SystemClock.elapsedRealtime() + 6_000L
+            initialListeningDeadlineMs = SystemClock.elapsedRealtime() + 10_000L
         }
         val connection = connectionStore.load()
         when {
             connection == null -> {
-                status.text = "Hermes-Verbindung bitte in der App einrichten"
+                showInlineStatus("Hermes-Verbindung bitte in der App einrichten")
                 return
             }
             context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED -> {
-                status.text = "Mikrofonzugriff in der App erlauben"
+                showInlineStatus("Mikrofonzugriff in der App erlauben")
                 return
             }
             !SpeechRecognizer.isRecognitionAvailable(context) -> {
-                status.text = "Android-Spracherkennung ist nicht verfügbar"
+                showInlineStatus("Android-Spracherkennung ist nicht verfügbar")
                 return
             }
         }
@@ -373,7 +393,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val activeConnection = connection ?: return
         lastPartialText = ""
         transcript.text = ""
-        status.text = "Bereit"
+        hideInlineStatus()
+        voiceLabel.text = "Ich höre zu"
         showVoiceInputIndicator()
         stopRecognition()
         val generation = ++recognitionGeneration
@@ -385,7 +406,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 override fun onEndOfSpeech() {
                     if (generation != recognitionGeneration) return
                     hideVoiceInputIndicator()
-                    if (!uiDismissed && !submitted) status.text = "Verarbeite Sprache …"
+                    if (!uiDismissed && !submitted) showInlineStatus("Verarbeite Sprache …")
                 }
                 override fun onRmsChanged(rmsdB: Float) {
                     if (generation != recognitionGeneration) return
@@ -402,7 +423,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                         ?.ifBlank { null } ?: lastPartialText.ifBlank { null }
                     if (text == null) {
-                        if (!uiDismissed) status.text = "Ich habe nichts verstanden"
+                        if (!uiDismissed) showInlineStatus("Ich habe nichts verstanden")
                     } else submitToHermes(text, activeConnection, spoken = true)
                 }
                 override fun onError(error: Int) {
@@ -415,14 +436,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     } else if (retryableInitialError && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
                         // Google recognizers may apply a very short initial-silence timeout.
                         // Keep the listening window alive without making the user restart the gesture.
-                        status.text = "Ich höre noch zu …"
+                        voiceLabel.text = "Ich höre noch zu …"
                         stopRecognition()
                         rootContainer.postDelayed({
                             if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
                         }, 90)
                     } else {
                         hideVoiceInputIndicator()
-                        status.text = recognitionErrorText(error)
+                        showInlineStatus(recognitionErrorText(error))
                     }
                 }
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -440,7 +461,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         if (text.isBlank()) return
         val connection = connectionStore.load()
         if (connection == null) {
-            status.text = "Hermes-Verbindung bitte in der App einrichten"
+            showInlineStatus("Hermes-Verbindung bitte in der App einrichten")
             return
         }
         composer.text?.clear()
@@ -464,14 +485,17 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         stopRecognition()
         waveform.setLevel(0f)
         transcript.text = ""
-        status.text = "Hermes denkt nach …"
+        hideInlineStatus()
         if (queuedMessage == null) {
             addUserBubble(text, spoken)
         } else {
             queuedMessage.state.text = "Wird gesendet …"
             queuedMessage.steerButton.visibility = View.GONE
         }
-        activeAgentText = addAgentBubble().apply { this.text = "…" }
+        activeAgentText = addAgentBubble().apply {
+            this.text = "Hermes denkt nach …"
+            startThinkingIndicator(this)
+        }
 
         HermesRunClient(connection).start(text, object : HermesRunListener {
             private val streamed = StringBuilder()
@@ -483,7 +507,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             override fun onDelta(delta: String) {
                 streamed.append(delta)
                 postToUi {
-                    status.text = "Hermes antwortet …"
+                    hideInlineStatus()
+                    stopThinkingIndicator()
                     val target = activeAgentText ?: addAgentBubble().also { activeAgentText = it }
                     target.text = streamed.toString()
                     scrollMessagesToBottom()
@@ -493,7 +518,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             override fun onCompleted(output: String) {
                 val finalOutput = output.ifBlank { streamed.toString() }
                 postToUi {
-                    status.text = "Bereit"
+                    hideInlineStatus()
+                    stopThinkingIndicator()
                     val target = activeAgentText ?: addAgentBubble().also { activeAgentText = it }
                     target.text = finalOutput
                     scrollMessagesToBottom()
@@ -506,7 +532,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
             override fun onFailed(message: String) {
                 postToUi {
-                    status.text = message
+                    stopThinkingIndicator()
+                    showInlineStatus(message)
                     submitted = false
                     activeRunId = null
                     waveform.setLevel(0f)
@@ -521,7 +548,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val pending = PendingMessage(text, spoken, bubble.state, bubble.steerButton)
         bubble.steerButton.setOnClickListener { steerPendingMessage(pending) }
         pendingMessages.addLast(pending)
-        status.text = "Hermes arbeitet — Nachricht vorgemerkt"
+        scrollMessagesToBottom()
     }
 
     private fun startNextQueuedMessage() {
@@ -531,7 +558,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         if (connection == null) {
             next.state.text = "Verbindung erforderlich"
             next.steerButton.visibility = View.GONE
-            status.text = "Hermes-Verbindung bitte in der App einrichten"
+            showInlineStatus("Hermes-Verbindung bitte in der App einrichten")
             return
         }
         submitToHermes(next.text, connection, next.spoken, queuedMessage = next)
@@ -646,6 +673,54 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         animateMessageEntry(wrapper, fromRight = false)
         scrollMessagesToBottom()
         return body
+    }
+
+    private fun startThinkingIndicator(view: View) {
+        thinkingAnimator?.cancel()
+        thinkingAnimator = ValueAnimator.ofFloat(0.55f, 1f).apply {
+            duration = 720
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation -> view.alpha = animation.animatedValue as Float }
+            start()
+        }
+    }
+
+    private fun stopThinkingIndicator() {
+        thinkingAnimator?.cancel()
+        thinkingAnimator = null
+        activeAgentText?.alpha = 1f
+    }
+
+    private fun showInlineStatus(text: String) {
+        status.animate().cancel()
+        status.text = text
+        if (status.visibility != View.VISIBLE) {
+            status.visibility = View.VISIBLE
+            status.alpha = 0f
+            status.translationY = dp(8).toFloat()
+        }
+        status.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(150)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
+    }
+
+    private fun hideInlineStatus() {
+        if (status.visibility != View.VISIBLE) return
+        status.animate().cancel()
+        status.animate()
+            .alpha(0f)
+            .translationY(dp(6).toFloat())
+            .setDuration(120)
+            .withEndAction {
+                status.visibility = View.GONE
+                status.translationY = 0f
+            }
+            .start()
     }
 
     private fun showVoiceInputIndicator() {

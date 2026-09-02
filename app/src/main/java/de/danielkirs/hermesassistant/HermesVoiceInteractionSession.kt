@@ -1,5 +1,7 @@
 package de.danielkirs.hermesassistant
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.Manifest
 import android.content.Context
@@ -45,6 +47,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private lateinit var status: TextView
     private lateinit var transcript: TextView
     private lateinit var waveform: WaveformView
+    private lateinit var voiceInputContainer: LinearLayout
     private lateinit var messages: LinearLayout
     private lateinit var messageScroll: ScrollView
     private lateinit var composer: EditText
@@ -53,6 +56,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private lateinit var textToSpeech: TextToSpeech
 
     private var activeAgentText: TextView? = null
+    private var voiceIndicatorAnimator: ValueAnimator? = null
     private var activeRunId: String? = null
     private var steeringPending: PendingMessage? = null
     private val pendingMessages = ArrayDeque<PendingMessage>()
@@ -121,26 +125,12 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             addView(createHeader(), matchWidth())
 
             status = TextView(context).apply {
-                text = "Ich höre zu"
+                text = "Bereit"
                 setTextColor(primaryText)
                 textSize = 17f
                 gravity = Gravity.CENTER
             }
             addView(status, matchWidth(top = 6))
-
-            waveform = WaveformView(context).apply {
-                contentDescription = "Audiopegel"
-                setAccentColor(accentColor)
-            }
-            addView(waveform, matchWidth(height = dp(38), top = 4))
-
-            transcript = TextView(context).apply {
-                setTextColor(secondaryText)
-                textSize = 14f
-                gravity = Gravity.CENTER
-                maxLines = 2
-            }
-            addView(transcript, matchWidth(top = 2))
 
             messageScroll = ScrollView(context).apply {
                 isFillViewport = true
@@ -164,6 +154,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             ))
             addView(messageScroll, matchWidth(top = 6))
 
+            addView(createVoiceInputIndicator(), matchWidth(height = 0, top = 6))
             addView(createComposer(), matchWidth(top = 8))
         }
 
@@ -234,6 +225,36 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         return header
     }
 
+    private fun createVoiceInputIndicator(): View {
+        voiceInputContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            alpha = 0f
+            visibility = View.GONE
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = roundedBackground(surfaceContainerColor, dp(18))
+        }
+        voiceInputContainer.addView(TextView(context).apply {
+            text = "Ich höre zu"
+            setTextColor(accentColor)
+            textSize = 13f
+            gravity = Gravity.CENTER
+        }, matchWidth())
+        waveform = WaveformView(context).apply {
+            contentDescription = "Audiopegel"
+            setAccentColor(accentColor)
+        }
+        voiceInputContainer.addView(waveform, matchWidth(height = dp(32), top = 2))
+        transcript = TextView(context).apply {
+            setTextColor(secondaryText)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            maxLines = 2
+        }
+        voiceInputContainer.addView(transcript, matchWidth(top = 2))
+        return voiceInputContainer
+    }
+
     private fun createComposer(): View {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -298,8 +319,11 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         initialHistoryRendered = false
         chatTouchedByUser = false
         deferredHistory.clear()
+        voiceIndicatorAnimator?.cancel()
+        voiceInputContainer.visibility = View.GONE
+        voiceInputContainer.alpha = 0f
+        voiceInputContainer.layoutParams = (voiceInputContainer.layoutParams as LinearLayout.LayoutParams).apply { height = 0 }
         transcript.text = ""
-        transcript.visibility = View.VISIBLE
         messages.removeAllViews()
         messageScroll.visibility = View.GONE
         waveform.setLevel(0f)
@@ -310,7 +334,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private fun requestFreshRecognition() {
         stopRecognition()
-        status.text = "Ich höre zu — lass dir Zeit"
+        status.text = "Bereit"
         rootContainer.postDelayed({
             if (!submitted && !uiDismissed) startRecognition()
         }, 140)
@@ -349,7 +373,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val activeConnection = connection ?: return
         lastPartialText = ""
         transcript.text = ""
-        status.text = "Ich höre zu — lass dir Zeit"
+        status.text = "Bereit"
+        showVoiceInputIndicator()
         stopRecognition()
         val generation = ++recognitionGeneration
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
@@ -359,6 +384,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
                 override fun onEndOfSpeech() {
                     if (generation != recognitionGeneration) return
+                    hideVoiceInputIndicator()
                     if (!uiDismissed && !submitted) status.text = "Verarbeite Sprache …"
                 }
                 override fun onRmsChanged(rmsdB: Float) {
@@ -395,6 +421,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                             if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
                         }, 90)
                     } else {
+                        hideVoiceInputIndicator()
                         status.text = recognitionErrorText(error)
                     }
                 }
@@ -433,6 +460,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     ) {
         if (submitted) return
         submitted = true
+        hideVoiceInputIndicator()
         stopRecognition()
         waveform.setLevel(0f)
         transcript.text = ""
@@ -620,6 +648,59 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         return body
     }
 
+    private fun showVoiceInputIndicator() {
+        voiceIndicatorAnimator?.cancel()
+        val params = voiceInputContainer.layoutParams as LinearLayout.LayoutParams
+        val startHeight = params.height.coerceAtLeast(0)
+        val targetHeight = dp(96)
+        voiceInputContainer.visibility = View.VISIBLE
+        voiceInputContainer.alpha = if (startHeight == 0) 0f else voiceInputContainer.alpha
+        voiceIndicatorAnimator = ValueAnimator.ofInt(startHeight, targetHeight).apply {
+            duration = 220
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                val height = animation.animatedValue as Int
+                voiceInputContainer.layoutParams = (voiceInputContainer.layoutParams as LinearLayout.LayoutParams).apply {
+                    this.height = height
+                }
+                voiceInputContainer.alpha = height / targetHeight.toFloat()
+                voiceInputContainer.requestLayout()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    applyKeyboardLayout()
+                }
+            })
+            start()
+        }
+    }
+
+    private fun hideVoiceInputIndicator() {
+        if (voiceInputContainer.visibility != View.VISIBLE) return
+        voiceIndicatorAnimator?.cancel()
+        val startHeight = (voiceInputContainer.layoutParams as LinearLayout.LayoutParams).height.coerceAtLeast(0)
+        voiceIndicatorAnimator = ValueAnimator.ofInt(startHeight, 0).apply {
+            duration = 180
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                val height = animation.animatedValue as Int
+                voiceInputContainer.layoutParams = (voiceInputContainer.layoutParams as LinearLayout.LayoutParams).apply {
+                    this.height = height
+                }
+                voiceInputContainer.alpha = if (startHeight == 0) 0f else height / startHeight.toFloat()
+                voiceInputContainer.requestLayout()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    voiceInputContainer.visibility = View.GONE
+                    voiceInputContainer.alpha = 0f
+                    applyKeyboardLayout()
+                }
+            })
+            start()
+        }
+    }
+
     private fun loadOlderHistoryPage() {
         if (deferredHistory.isNotEmpty()) {
             val deferred = deferredHistory.toList()
@@ -805,7 +886,6 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             .setDuration(220)
             .setInterpolator(DecelerateInterpolator())
             .start()
-        transcript.visibility = View.GONE
     }
 
     private fun animateMessageEntry(view: View, fromRight: Boolean) {

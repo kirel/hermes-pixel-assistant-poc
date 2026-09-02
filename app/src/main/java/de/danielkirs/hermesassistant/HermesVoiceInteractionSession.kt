@@ -17,6 +17,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -73,6 +74,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var rootTouchStartY = 0f
     private var isDraggingSheet = false
     private var initialListeningDeadlineMs = 0L
+    private var recognitionStartedAtMs = 0L
     private var recognitionGeneration = 0
     private var keyboardHeightPx = 0
     private var sheetKeyboardOffsetPx = 0
@@ -101,6 +103,10 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val state: TextView,
         val steerButton: TextView
     )
+
+    private companion object {
+        const val RECOGNITION_LOG_TAG = "HermesSpeech"
+    }
 
     init {
         textToSpeech = TextToSpeech(context) { result ->
@@ -369,6 +375,18 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         speechRecognizer = null
     }
 
+    private fun retryRecognitionWithinWindow(reason: String): Boolean {
+        if (SystemClock.elapsedRealtime() >= initialListeningDeadlineMs || submitted || uiDismissed) return false
+        traceRecognition("retry:$reason")
+        voiceLabel.text = "Ich höre noch zu …"
+        showVoiceInputIndicator()
+        stopRecognition()
+        rootContainer.postDelayed({
+            if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
+        }, 120)
+        return true
+    }
+
     private fun startRecognition(continueInitialWindow: Boolean = false) {
         if (submitted) return
         if (!continueInitialWindow) {
@@ -397,16 +415,30 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         voiceLabel.text = "Ich höre zu"
         showVoiceInputIndicator()
         stopRecognition()
+        recognitionStartedAtMs = SystemClock.elapsedRealtime()
         val generation = ++recognitionGeneration
+        var speechStarted = false
+        traceRecognition("start")
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
-                override fun onBeginningOfSpeech() = Unit
+                override fun onReadyForSpeech(params: Bundle?) {
+                    if (generation == recognitionGeneration) traceRecognition("ready")
+                }
+                override fun onBeginningOfSpeech() {
+                    if (generation != recognitionGeneration) return
+                    speechStarted = true
+                    traceRecognition("speech-begin")
+                }
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
                 override fun onEndOfSpeech() {
                     if (generation != recognitionGeneration) return
-                    hideVoiceInputIndicator()
-                    if (!uiDismissed && !submitted) showInlineStatus("Verarbeite Sprache …")
+                    traceRecognition("speech-end:began=$speechStarted partialChars=${lastPartialText.length}")
+                    if (speechStarted || lastPartialText.isNotBlank()) {
+                        hideVoiceInputIndicator()
+                        if (!uiDismissed && !submitted) showInlineStatus("Verarbeite Sprache …")
+                    } else {
+                        voiceLabel.text = "Ich höre noch zu …"
+                    }
                 }
                 override fun onRmsChanged(rmsdB: Float) {
                     if (generation != recognitionGeneration) return
@@ -415,32 +447,35 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 override fun onPartialResults(partialResults: Bundle?) {
                     if (generation != recognitionGeneration) return
                     val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                    if (!text.isNullOrBlank()) lastPartialText = text
+                    if (!text.isNullOrBlank()) {
+                        lastPartialText = text
+                        traceRecognition("partial:chars=${text.length}")
+                    }
                     if (!uiDismissed && !text.isNullOrBlank()) transcript.text = text
                 }
                 override fun onResults(results: Bundle?) {
                     if (generation != recognitionGeneration) return
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                         ?.ifBlank { null } ?: lastPartialText.ifBlank { null }
+                    traceRecognition("results:chars=${text?.length ?: 0}")
                     if (text == null) {
-                        if (!uiDismissed) showInlineStatus("Ich habe nichts verstanden")
+                        if (!retryRecognitionWithinWindow("empty-results")) {
+                            hideVoiceInputIndicator()
+                            if (!uiDismissed) showInlineStatus("Ich habe nichts verstanden")
+                        }
                     } else submitToHermes(text, activeConnection, spoken = true)
                 }
                 override fun onError(error: Int) {
                     if (generation != recognitionGeneration || submitted || uiDismissed) return
+                    traceRecognition("error:${recognitionErrorName(error)} partialChars=${lastPartialText.length}")
                     val retryableInitialError = error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                        error == SpeechRecognizer.ERROR_NO_MATCH ||
                         error == SpeechRecognizer.ERROR_CLIENT ||
                         error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) && lastPartialText.isNotBlank()) {
                         submitToHermes(lastPartialText, activeConnection, spoken = true)
-                    } else if (retryableInitialError && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
-                        // Google recognizers may apply a very short initial-silence timeout.
-                        // Keep the listening window alive without making the user restart the gesture.
-                        voiceLabel.text = "Ich höre noch zu …"
-                        stopRecognition()
-                        rootContainer.postDelayed({
-                            if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
-                        }, 90)
+                    } else if (retryableInitialError && retryRecognitionWithinWindow(recognitionErrorName(error))) {
+                        // Retry scheduled within the still-active initial listening window.
                     } else {
                         hideVoiceInputIndicator()
                         showInlineStatus(recognitionErrorText(error))
@@ -1074,6 +1109,26 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height).apply { topMargin = dp(top) }
 
     private fun dp(value: Int) = (value * density).toInt()
+
+    private fun traceRecognition(event: String) {
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = (now - recognitionStartedAtMs).coerceAtLeast(0L)
+        val remaining = (initialListeningDeadlineMs - now).coerceAtLeast(0L)
+        Log.i(RECOGNITION_LOG_TAG, "generation=$recognitionGeneration elapsedMs=$elapsed remainingMs=$remaining event=$event")
+    }
+
+    private fun recognitionErrorName(error: Int): String = when (error) {
+        SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
+        SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "PERMISSIONS"
+        SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
+        SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "BUSY"
+        SpeechRecognizer.ERROR_SERVER -> "SERVER"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT"
+        else -> "UNKNOWN_$error"
+    }
 
     private fun recognitionErrorText(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Ich habe nichts verstanden"

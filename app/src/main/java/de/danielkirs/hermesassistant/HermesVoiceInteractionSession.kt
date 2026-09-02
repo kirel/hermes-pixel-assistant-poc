@@ -64,6 +64,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var lastPartialText = ""
     private var dragStartY = 0f
     private var dragStartTranslationY = 0f
+    private var rootTouchStartY = 0f
     private var isDraggingSheet = false
     private var initialListeningDeadlineMs = 0L
     private var recognitionGeneration = 0
@@ -168,11 +169,25 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
         rootContainer = FrameLayout(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
-            setOnTouchListener { _, event ->
-                if (event.action == MotionEvent.ACTION_UP) {
-                    animateDismissSheet()
-                    true
-                } else true
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        rootTouchStartY = event.y
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val startedInBottomGestureZone = rootTouchStartY >= view.height - dp(72)
+                        if (startedInBottomGestureZone && rootTouchStartY - event.y > dp(36)) {
+                            animateDismissSheet()
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        animateDismissSheet()
+                        true
+                    }
+                    else -> true
+                }
             }
             addView(sheetPanel, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -181,7 +196,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             ).apply {
                 leftMargin = dp(16)
                 rightMargin = dp(16)
-                bottomMargin = dp(18)
+                bottomMargin = dp(36)
             })
         }
         rootContainer.post { installKeyboardAwareLayout() }
@@ -246,7 +261,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val voice = MicrophoneButton(context, accentColor, surfaceColor).apply {
             contentDescription = "Sprachaufnahme starten"
             setOnClickListener {
-                if (!submitted) startRecognition()
+                if (!submitted) requestFreshRecognition()
             }
         }
         row.addView(voice, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
@@ -293,6 +308,23 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         loadHistoryPage(initial = true)
     }
 
+    private fun requestFreshRecognition() {
+        stopRecognition()
+        status.text = "Ich höre zu — lass dir Zeit"
+        rootContainer.postDelayed({
+            if (!submitted && !uiDismissed) startRecognition()
+        }, 140)
+    }
+
+    private fun stopRecognition() {
+        recognitionGeneration += 1
+        speechRecognizer?.let { recognizer ->
+            try { recognizer.cancel() } catch (_: Exception) { }
+            try { recognizer.destroy() } catch (_: Exception) { }
+        }
+        speechRecognizer = null
+    }
+
     private fun startRecognition(continueInitialWindow: Boolean = false) {
         if (submitted) return
         if (!continueInitialWindow) {
@@ -318,8 +350,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         lastPartialText = ""
         transcript.text = ""
         status.text = "Ich höre zu — lass dir Zeit"
+        stopRecognition()
         val generation = ++recognitionGeneration
-        speechRecognizer?.destroy()
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) = Unit
@@ -349,14 +381,16 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 }
                 override fun onError(error: Int) {
                     if (generation != recognitionGeneration || submitted || uiDismissed) return
+                    val retryableInitialError = error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                        error == SpeechRecognizer.ERROR_CLIENT ||
+                        error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) && lastPartialText.isNotBlank()) {
                         submitToHermes(lastPartialText, activeConnection, spoken = true)
-                    } else if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
+                    } else if (retryableInitialError && SystemClock.elapsedRealtime() < initialListeningDeadlineMs) {
                         // Google recognizers may apply a very short initial-silence timeout.
                         // Keep the listening window alive without making the user restart the gesture.
                         status.text = "Ich höre noch zu …"
-                        recognitionGeneration += 1
-                        speechRecognizer?.destroy()
+                        stopRecognition()
                         rootContainer.postDelayed({
                             if (!submitted && !uiDismissed) startRecognition(continueInitialWindow = true)
                         }, 90)
@@ -399,7 +433,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     ) {
         if (submitted) return
         submitted = true
-        speechRecognizer?.cancel()
+        stopRecognition()
         waveform.setLevel(0f)
         transcript.text = ""
         status.text = "Hermes denkt nach …"
@@ -709,7 +743,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private fun applyKeyboardLayout() {
         val sheetParams = sheetPanel.layoutParams as FrameLayout.LayoutParams
         val keyboardSafeGap = if (keyboardHeightPx > 0) dp(12) else 0
-        val targetMargin = dp(18) + sheetKeyboardOffsetPx + keyboardSafeGap
+        val targetMargin = dp(36) + sheetKeyboardOffsetPx + keyboardSafeGap
         if (sheetParams.bottomMargin != targetMargin) {
             sheetParams.bottomMargin = targetMargin
             sheetPanel.layoutParams = sheetParams
@@ -844,7 +878,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private fun animateDismissSheet() {
         if (uiDismissed) return
         uiDismissed = true
-        speechRecognizer?.cancel()
+        stopRecognition()
         waveform.setLevel(0f)
         val target = maxOf(rootContainer.height, sheetPanel.height).toFloat() + dp(36)
         sheetPanel.animate()
@@ -857,20 +891,20 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private fun dismissOverlay() {
         uiDismissed = true
-        speechRecognizer?.cancel()
+        stopRecognition()
         waveform.setLevel(0f)
         hide()
     }
 
     override fun onHide() {
         uiDismissed = true
-        speechRecognizer?.cancel()
+        stopRecognition()
         super.onHide()
     }
 
     override fun onDestroy() {
         // Do not call the Hermes stop endpoint here; accepted remote work must survive UI teardown.
-        speechRecognizer?.destroy()
+        stopRecognition()
         textToSpeech.stop()
         textToSpeech.shutdown()
         super.onDestroy()

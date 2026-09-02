@@ -1,5 +1,6 @@
 package de.danielkirs.hermesassistant
 
+import android.animation.ValueAnimator
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -16,6 +17,10 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -39,6 +44,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private lateinit var messages: LinearLayout
     private lateinit var messageScroll: ScrollView
     private lateinit var composer: EditText
+    private lateinit var sheetPanel: LinearLayout
+    private lateinit var rootContainer: FrameLayout
     private lateinit var textToSpeech: TextToSpeech
 
     private var activeAgentText: TextView? = null
@@ -49,6 +56,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var pendingSpeech: String? = null
     private var lastPartialText = ""
     private var dragStartY = 0f
+    private var dragStartTranslationY = 0f
+    private var isDraggingSheet = false
+    private val dragSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val surfaceColor = Color.rgb(20, 24, 34)
     private val surfaceContainerColor = Color.rgb(37, 43, 57)
@@ -70,23 +80,10 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     }
 
     override fun onCreateContentView(): View {
-        val panel = LinearLayout(context).apply {
+        sheetPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(12), dp(18), dp(14))
             background = roundedBackground(surfaceColor, dp(30))
-            setOnTouchListener { _, event ->
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        dragStartY = event.rawY
-                        true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        if (event.rawY - dragStartY > dp(72)) dismissOverlay()
-                        true
-                    }
-                    else -> true
-                }
-            }
 
             addView(createHeader(), matchWidth())
 
@@ -130,15 +127,15 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             addView(createComposer(), matchWidth(top = 8))
         }
 
-        return FrameLayout(context).apply {
+        rootContainer = FrameLayout(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
             setOnTouchListener { _, event ->
                 if (event.action == MotionEvent.ACTION_UP) {
-                    dismissOverlay()
+                    animateDismissSheet()
                     true
                 } else true
             }
-            addView(panel, FrameLayout.LayoutParams(
+            addView(sheetPanel, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
@@ -148,10 +145,13 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 bottomMargin = dp(18)
             })
         }
+        return rootContainer
     }
 
     private fun createHeader(): View {
-        val header = FrameLayout(context)
+        val header = FrameLayout(context).apply {
+            setOnTouchListener { _, event -> handleSheetDrag(event) }
+        }
         val handle = View(context).apply {
             background = roundedBackground(Color.rgb(111, 106, 123), dp(3))
         }
@@ -173,7 +173,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             gravity = Gravity.CENTER
             setTextColor(secondaryText)
             contentDescription = "Assistant schließen"
-            setOnClickListener { dismissOverlay() }
+            setOnClickListener { animateDismissSheet() }
         }
         header.addView(close, FrameLayout.LayoutParams(dp(40), dp(32), Gravity.END or Gravity.BOTTOM))
         return header
@@ -227,6 +227,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     override fun onShow(args: Bundle?, flags: Int) {
         super.onShow(args, flags)
         uiDismissed = false
+        sheetPanel.animate().cancel()
+        sheetPanel.translationY = 0f
         submitted = false
         lastPartialText = ""
         pendingSpeech = null
@@ -380,6 +382,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             Gravity.END
         ))
         messages.addView(wrapper, matchWidth(top = 8))
+        animateMessageEntry(wrapper, fromRight = true)
         scrollMessagesToBottom()
     }
 
@@ -407,17 +410,47 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             ViewGroup.LayoutParams.WRAP_CONTENT
         ))
         messages.addView(wrapper, matchWidth(top = 12))
+        animateMessageEntry(wrapper, fromRight = false)
         scrollMessagesToBottom()
         return body
     }
 
     private fun ensureChatVisible() {
         if (messageScroll.visibility == View.VISIBLE) return
+        val targetHeight = maxOf(dp(220), (context.resources.displayMetrics.heightPixels * 0.48f).toInt())
         messageScroll.visibility = View.VISIBLE
-        messageScroll.layoutParams = (messageScroll.layoutParams as LinearLayout.LayoutParams).apply {
-            height = maxOf(dp(220), (context.resources.displayMetrics.heightPixels * 0.48f).toInt())
+        messageScroll.alpha = 0f
+        messageScroll.translationY = dp(20).toFloat()
+        messageScroll.layoutParams = (messageScroll.layoutParams as LinearLayout.LayoutParams).apply { height = 0 }
+        ValueAnimator.ofInt(0, targetHeight).apply {
+            duration = 260
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                messageScroll.layoutParams = (messageScroll.layoutParams as LinearLayout.LayoutParams).apply {
+                    height = animation.animatedValue as Int
+                }
+                messageScroll.requestLayout()
+            }
+            start()
         }
+        messageScroll.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(220)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
         transcript.visibility = View.GONE
+    }
+
+    private fun animateMessageEntry(view: View, fromRight: Boolean) {
+        view.alpha = 0f
+        view.translationX = if (fromRight) dp(20).toFloat() else -dp(20).toFloat()
+        view.animate()
+            .alpha(1f)
+            .translationX(0f)
+            .setDuration(180)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
     }
 
     private fun scrollMessagesToBottom() {
@@ -436,6 +469,53 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             return
         }
         textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hermes-final-response")
+    }
+
+    private fun handleSheetDrag(event: MotionEvent): Boolean {
+        if (uiDismissed) return true
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                sheetPanel.animate().cancel()
+                dragStartY = event.rawY
+                dragStartTranslationY = sheetPanel.translationY
+                isDraggingSheet = false
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val delta = (event.rawY - dragStartY).coerceAtLeast(0f)
+                if (delta > dragSlop) isDraggingSheet = true
+                if (isDraggingSheet) sheetPanel.translationY = dragStartTranslationY + delta
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val dismissThreshold = maxOf(dp(104).toFloat(), sheetPanel.height * 0.24f)
+                if (isDraggingSheet && sheetPanel.translationY >= dismissThreshold) {
+                    animateDismissSheet()
+                } else {
+                    sheetPanel.animate()
+                        .translationY(0f)
+                        .setDuration(260)
+                        .setInterpolator(OvershootInterpolator(0.65f))
+                        .start()
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun animateDismissSheet() {
+        if (uiDismissed) return
+        uiDismissed = true
+        speechRecognizer?.cancel()
+        waveform.setLevel(0f)
+        val target = maxOf(rootContainer.height, sheetPanel.height).toFloat() + dp(36)
+        sheetPanel.animate()
+            .translationY(target)
+            .setDuration(220)
+            .setInterpolator(AccelerateInterpolator(1.3f))
+            .withEndAction { hide() }
+            .start()
     }
 
     private fun dismissOverlay() {
@@ -519,7 +599,8 @@ private class WaveformView(context: Context) : View(context) {
     private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         strokeCap = android.graphics.Paint.Cap.ROUND
     }
-    private var level = 0f
+    private var targetLevel = 0f
+    private var displayedLevel = 0f
     private var accent = Color.rgb(208, 188, 255)
 
     fun setAccentColor(color: Int) {
@@ -528,20 +609,22 @@ private class WaveformView(context: Context) : View(context) {
     }
 
     fun setLevel(newLevel: Float) {
-        level = newLevel.coerceIn(0f, 1f)
-        invalidate()
+        targetLevel = newLevel.coerceIn(0f, 1f)
+        postInvalidateOnAnimation()
     }
 
     override fun onDraw(canvas: android.graphics.Canvas) {
         super.onDraw(canvas)
         val bars = 21
+        displayedLevel += (targetLevel - displayedLevel) * 0.22f
+        if (kotlin.math.abs(targetLevel - displayedLevel) > 0.01f) postInvalidateOnAnimation()
         val gap = width / (bars * 2f)
         val centerY = height / 2f
         val baseHeight = height * 0.15f
         for (index in 0 until bars) {
             val distance = kotlin.math.abs(index - (bars - 1) / 2f) / ((bars - 1) / 2f)
             val envelope = 1f - distance * 0.55f
-            val barHeight = baseHeight + level * height * 0.76f * envelope
+            val barHeight = baseHeight + displayedLevel * height * 0.76f * envelope
             paint.color = Color.argb((150 + 105 * envelope).toInt(), Color.red(accent), Color.green(accent), Color.blue(accent))
             paint.strokeWidth = gap * 0.72f
             val x = gap + index * gap * 2f

@@ -34,6 +34,32 @@ class HermesRunClient(private val connection: HermesConnection) {
         }
     }
 
+    fun steer(runId: String, input: String, callback: (accepted: Boolean, message: String) -> Unit) {
+        Thread {
+            try {
+                val request = openConnection("/v1/runs/$runId/steer", "POST").apply {
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                val body = JSONObject().put("input", input).toString()
+                OutputStreamWriter(request.outputStream, Charsets.UTF_8).use { it.write(body) }
+                val code = request.responseCode
+                val response = readBody(request, code)
+                request.disconnect()
+                if (code in 200..299 && JSONObject(response).optBoolean("accepted", false)) {
+                    callback(true, "Als Hinweis ergänzt")
+                } else {
+                    callback(false, "Hinweis konnte nicht ergänzt werden")
+                }
+            } catch (_: Exception) {
+                callback(false, "Hinweis konnte nicht ergänzt werden")
+            }
+        }.apply {
+            name = "HermesSteer"
+            start()
+        }
+    }
+
     private fun createRun(input: String): String {
         val body = JSONObject().apply {
             put("input", input)

@@ -12,6 +12,7 @@ A native Kotlin Android proof of concept for a personal [Hermes Agent](https://g
 - Hermes Runs API client: `POST /v1/runs` plus SSE consumption from `/v1/runs/{run_id}/events`
 - Streaming response text and final Android `TextToSpeech` output
 - A growing Material-inspired conversation sheet with left/right Hermes and user bubbles, scrollable history, text composer, and voice trigger
+- Visible FIFO queue for typed follow-ups, with a per-message action to steer a live Hermes run
 - First-run configuration for Tailnet host, port, and bearer API key
 - API key storage encrypted with an Android Keystore AES-GCM key
 - Dismiss with a downward swipe or a tap outside the widget; an already accepted Hermes run is deliberately not cancelled

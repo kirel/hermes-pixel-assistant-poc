@@ -28,6 +28,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.util.ArrayDeque
 import java.util.Locale
 
 /**
@@ -50,6 +51,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private lateinit var textToSpeech: TextToSpeech
 
     private var activeAgentText: TextView? = null
+    private var activeRunId: String? = null
+    private var steeringPending: PendingMessage? = null
+    private val pendingMessages = ArrayDeque<PendingMessage>()
     private var speechRecognizer: SpeechRecognizer? = null
     private var ttsInitialized = false
     private var submitted = false
@@ -70,6 +74,15 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private val primaryText = Color.rgb(245, 241, 255)
     private val secondaryText = Color.rgb(204, 198, 220)
     private val accentColor = Color.rgb(208, 188, 255)
+
+    private data class PendingBubble(val state: TextView, val steerButton: TextView)
+
+    private data class PendingMessage(
+        val text: String,
+        val spoken: Boolean,
+        val state: TextView,
+        val steerButton: TextView
+    )
 
     init {
         textToSpeech = TextToSpeech(context) { result ->
@@ -236,6 +249,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         lastPartialText = ""
         pendingSpeech = null
         activeAgentText = null
+        activeRunId = null
+        steeringPending = null
+        pendingMessages.clear()
         transcript.text = ""
         transcript.visibility = View.VISIBLE
         messages.removeAllViews()
@@ -328,30 +344,47 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private fun submitTypedText() {
         val text = composer.text.toString().trim()
-        if (text.isBlank() || submitted) return
+        if (text.isBlank()) return
         val connection = connectionStore.load()
         if (connection == null) {
             status.text = "Hermes-Verbindung bitte in der App einrichten"
             return
         }
         composer.text?.clear()
-        submitToHermes(text, connection, spoken = false)
+        if (submitted || pendingMessages.isNotEmpty() || steeringPending != null) {
+            enqueueMessage(text, spoken = false)
+            if (!submitted) startNextQueuedMessage()
+        } else {
+            submitToHermes(text, connection, spoken = false)
+        }
     }
 
-    private fun submitToHermes(text: String, connection: HermesConnection, spoken: Boolean) {
+    private fun submitToHermes(
+        text: String,
+        connection: HermesConnection,
+        spoken: Boolean,
+        queuedMessage: PendingMessage? = null
+    ) {
         if (submitted) return
         submitted = true
         speechRecognizer?.cancel()
         waveform.setLevel(0f)
         transcript.text = ""
         status.text = "Hermes denkt nach …"
-        addUserBubble(text, spoken)
-        activeAgentText = null
+        if (queuedMessage == null) {
+            addUserBubble(text, spoken)
+        } else {
+            queuedMessage.state.text = "Wird gesendet …"
+            queuedMessage.steerButton.visibility = View.GONE
+        }
+        activeAgentText = addAgentBubble().apply { this.text = "…" }
 
         HermesRunClient(connection).start(text, object : HermesRunListener {
             private val streamed = StringBuilder()
 
-            override fun onStarted(runId: String) = Unit
+            override fun onStarted(runId: String) {
+                postToUi { activeRunId = runId }
+            }
 
             override fun onDelta(delta: String) {
                 streamed.append(delta)
@@ -371,7 +404,9 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     target.text = finalOutput
                     scrollMessagesToBottom()
                     submitted = false
+                    activeRunId = null
                     if (finalOutput.isNotBlank()) speakFinal(finalOutput)
+                    rootContainer.postDelayed({ startNextQueuedMessage() }, 120)
                 }
             }
 
@@ -379,14 +414,64 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 postToUi {
                     status.text = message
                     submitted = false
+                    activeRunId = null
                     waveform.setLevel(0f)
+                    rootContainer.postDelayed({ startNextQueuedMessage() }, 120)
                 }
             }
         })
     }
 
-    private fun addUserBubble(text: String, spoken: Boolean) {
+    private fun enqueueMessage(text: String, spoken: Boolean) {
+        val bubble = addUserBubble(text, spoken, queued = true) ?: return
+        val pending = PendingMessage(text, spoken, bubble.state, bubble.steerButton)
+        bubble.steerButton.setOnClickListener { steerPendingMessage(pending) }
+        pendingMessages.addLast(pending)
+        status.text = "Hermes arbeitet — Nachricht vorgemerkt"
+    }
+
+    private fun startNextQueuedMessage() {
+        if (submitted || steeringPending != null || pendingMessages.isEmpty()) return
+        val next = pendingMessages.removeFirst()
+        val connection = connectionStore.load()
+        if (connection == null) {
+            next.state.text = "Verbindung erforderlich"
+            next.steerButton.visibility = View.GONE
+            status.text = "Hermes-Verbindung bitte in der App einrichten"
+            return
+        }
+        submitToHermes(next.text, connection, next.spoken, queuedMessage = next)
+    }
+
+    private fun steerPendingMessage(pending: PendingMessage) {
+        val runId = activeRunId
+        val connection = connectionStore.load()
+        if (runId == null || connection == null || !submitted || steeringPending != null) return
+        steeringPending = pending
+        pending.state.text = "Wird als Hinweis ergänzt …"
+        pending.steerButton.isEnabled = false
+        HermesRunClient(connection).steer(runId, pending.text) { accepted, message ->
+            postToUi {
+                steeringPending = null
+                if (accepted) {
+                    pendingMessages.remove(pending)
+                    pending.state.text = message
+                    pending.steerButton.visibility = View.GONE
+                } else {
+                    pending.state.text = "Wartet"
+                    pending.steerButton.isEnabled = true
+                }
+                if (!submitted) startNextQueuedMessage()
+            }
+        }
+    }
+
+    private fun addUserBubble(text: String, spoken: Boolean, queued: Boolean = false): PendingBubble? {
         ensureChatVisible()
+        val column = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+        }
         val body = TextView(context).apply {
             this.text = if (spoken) "$text\n\n⌁  Gesprochen" else text
             setTextColor(Color.WHITE)
@@ -395,15 +480,49 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             background = roundedBackground(userBubbleColor, dp(22))
             setPadding(dp(15), dp(10), dp(15), dp(10))
         }
-        val wrapper = FrameLayout(context)
-        wrapper.addView(body, FrameLayout.LayoutParams(
+        column.addView(body, LinearLayout.LayoutParams(
             (context.resources.displayMetrics.widthPixels * 0.72f).toInt(),
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        var pendingBubble: PendingBubble? = null
+        if (queued) {
+            val metadata = LinearLayout(context).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+            val state = TextView(context).apply {
+                this.text = "Wartet"
+                setTextColor(secondaryText)
+                textSize = 12f
+                setPadding(0, dp(5), dp(8), 0)
+            }
+            val steer = TextView(context).apply {
+                this.text = "Als Hinweis ergänzen"
+                setTextColor(accentColor)
+                textSize = 12f
+                background = roundedBackground(surfaceContainerColor, dp(14))
+                setPadding(dp(10), dp(5), dp(10), dp(5))
+                contentDescription = "Als Hinweis in den laufenden Auftrag ergänzen"
+            }
+            metadata.addView(state)
+            metadata.addView(steer)
+            column.addView(metadata, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) })
+            pendingBubble = PendingBubble(state, steer)
+        }
+
+        val wrapper = FrameLayout(context)
+        wrapper.addView(column, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.END
         ))
         messages.addView(wrapper, matchWidth(top = 8))
         animateMessageEntry(wrapper, fromRight = true)
         scrollMessagesToBottom()
+        return pendingBubble
     }
 
     private fun addAgentBubble(): TextView {

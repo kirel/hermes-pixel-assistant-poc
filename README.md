@@ -13,7 +13,9 @@ A native Kotlin Android client for a personal [Hermes Agent](https://github.com/
 - Hermes Runs API client: `POST /v1/runs` plus SSE consumption from `/v1/runs/{run_id}/events`
 - Streaming response text and final Android `TextToSpeech` output
 - A growing Material-inspired conversation sheet with left/right Hermes and user bubbles, scrollable history, text composer, and voice trigger
-- Visible FIFO queue for typed follow-ups, with a per-message action to steer a live Hermes run
+- Visible queue for typed and spoken follow-ups; when the active run finishes, all waiting entries are sent together as one combined follow-up
+- Every waiting entry remains individually steerable; multiple selected Steers are submitted in order and removed from the later combined batch
+- Pending typed and spoken follow-ups survive sheet dismissal and process/session recreation
 - Resume UX that restores the latest persistent Pixel conversation and pages older messages on scroll
 - First-run configuration for Tailnet host, port, and bearer API key
 - API key storage encrypted with an Android Keystore AES-GCM key

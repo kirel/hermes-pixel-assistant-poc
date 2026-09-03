@@ -39,6 +39,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.ArrayDeque
 import java.util.Locale
 
@@ -49,6 +51,7 @@ import java.util.Locale
  */
 class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
     private val connectionStore = HermesConnectionStore(context)
+    private val queuePreferences = context.getSharedPreferences(PENDING_QUEUE_PREFERENCES, Context.MODE_PRIVATE)
     private val density = context.resources.displayMetrics.density
 
     private lateinit var status: TextView
@@ -68,12 +71,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var thinkingAnimator: ValueAnimator? = null
     private var activeRunId: String? = null
     private var steeringPending: PendingMessage? = null
+    private val pendingSteers = ArrayDeque<PendingMessage>()
     private val pendingMessages = ArrayDeque<PendingMessage>()
     private var speechRecognizer: SpeechRecognizer? = null
     private var ttsInitialized = false
     private var submitted = false
     private var uiDismissed = false
     private var sessionVisible = false
+    private var sessionInitialized = false
     private var suppressActiveRunSpeech = false
     private var pendingSpeech: String? = null
     private var lastPartialText = ""
@@ -123,6 +128,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         const val RECOGNITION_LOG_TAG = "HermesSpeech"
         const val AUDIO_SAMPLE_RATE_HZ = 16_000
         const val AUDIO_CHUNK_BYTES = 3_200
+        const val PENDING_QUEUE_PREFERENCES = "pending_message_queue"
+        const val PENDING_QUEUE_KEY = "messages"
     }
 
     init {
@@ -339,16 +346,21 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     override fun onShow(args: Bundle?, flags: Int) {
         super.onShow(args, flags)
+        val reuseExistingSession = sessionInitialized
         val reinvokedWhileVisible = sessionVisible && !uiDismissed
         uiDismissed = false
         sheetPanel.animate().cancel()
         sheetPanel.translationY = 0f
-        if (reinvokedWhileVisible) {
-            Log.i(RECOGNITION_LOG_TAG, "session-reinvoked:restart-voice")
+        sessionVisible = true
+        if (reuseExistingSession) {
+            Log.i(
+                RECOGNITION_LOG_TAG,
+                if (reinvokedWhileVisible) "session-reinvoked:restart-voice" else "session-reopened:preserve-state"
+            )
             requestFreshRecognition(forceRestart = true)
             return
         }
-        sessionVisible = true
+        sessionInitialized = true
         submitted = false
         recognitionActive = false
         recognitionRestartPending = false
@@ -359,6 +371,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         activeAgentText = null
         activeRunId = null
         steeringPending = null
+        pendingSteers.clear()
         pendingMessages.clear()
         desiredChatHeightPx = 0
         historyOffset = 0
@@ -381,6 +394,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         textToSpeech.stop()
         startRecognition()
         loadHistoryPage(initial = true)
+        restorePendingMessages()
     }
 
     private fun requestFreshRecognition(forceRestart: Boolean = false) {
@@ -671,7 +685,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         composer.text?.clear()
         if (submitted || pendingMessages.isNotEmpty() || steeringPending != null) {
             enqueueMessage(text, spoken = false)
-            if (!submitted) startNextQueuedMessage()
+            if (!submitted) submitPendingBatch()
         } else {
             submitToHermes(text, connection, spoken = false)
         }
@@ -681,7 +695,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         text: String,
         connection: HermesConnection,
         spoken: Boolean,
-        queuedMessage: PendingMessage? = null
+        queuedMessages: List<PendingMessage> = emptyList()
     ) {
         if (submitted) return
         submitted = true
@@ -690,11 +704,13 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         waveform.setLevel(0f)
         transcript.text = ""
         hideInlineStatus()
-        if (queuedMessage == null) {
+        if (queuedMessages.isEmpty()) {
             addUserBubble(text, spoken)
         } else {
-            queuedMessage.state.text = "Wird gesendet …"
-            queuedMessage.steerButton.visibility = View.GONE
+            queuedMessages.forEach { queuedMessage ->
+                queuedMessage.state.text = "Wird gemeinsam gesendet …"
+                queuedMessage.steerButton.visibility = View.GONE
+            }
         }
         activeAgentText = addAgentBubble().apply {
             this.text = "Hermes denkt nach …"
@@ -705,12 +721,12 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
             private val streamed = StringBuilder()
 
             override fun onStarted(runId: String) {
-                postToUi { activeRunId = runId }
+                postToMain { activeRunId = runId }
             }
 
             override fun onDelta(delta: String) {
                 streamed.append(delta)
-                postToUi {
+                postToMain {
                     hideInlineStatus()
                     stopThinkingIndicator()
                     val target = activeAgentText ?: addAgentBubble().also { activeAgentText = it }
@@ -721,7 +737,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
             override fun onCompleted(output: String) {
                 val finalOutput = output.ifBlank { streamed.toString() }
-                postToUi {
+                postToMain {
                     hideInlineStatus()
                     stopThinkingIndicator()
                     val target = activeAgentText ?: addAgentBubble().also { activeAgentText = it }
@@ -731,20 +747,20 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                     activeRunId = null
                     val shouldSpeak = !suppressActiveRunSpeech
                     suppressActiveRunSpeech = false
-                    if (shouldSpeak && finalOutput.isNotBlank()) speakFinal(finalOutput)
-                    rootContainer.postDelayed({ startNextQueuedMessage() }, 120)
+                    if (!uiDismissed && shouldSpeak && finalOutput.isNotBlank()) speakFinal(finalOutput)
+                    rootContainer.postDelayed({ submitPendingBatch() }, 120)
                 }
             }
 
             override fun onFailed(message: String) {
-                postToUi {
+                postToMain {
                     stopThinkingIndicator()
-                    showInlineStatus(message)
+                    if (!uiDismissed) showInlineStatus(message)
                     submitted = false
                     activeRunId = null
                     suppressActiveRunSpeech = false
                     waveform.setLevel(0f)
-                    rootContainer.postDelayed({ startNextQueuedMessage() }, 120)
+                    rootContainer.postDelayed({ submitPendingBatch() }, 120)
                 }
             }
         })
@@ -755,42 +771,110 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         val pending = PendingMessage(text, spoken, bubble.state, bubble.steerButton)
         bubble.steerButton.setOnClickListener { steerPendingMessage(pending) }
         pendingMessages.addLast(pending)
+        persistPendingMessages()
         scrollMessagesToBottom()
     }
 
-    private fun startNextQueuedMessage() {
-        if (submitted || steeringPending != null || pendingMessages.isEmpty()) return
-        val next = pendingMessages.removeFirst()
+    private fun submitPendingBatch() {
+        if (submitted || steeringPending != null || pendingSteers.isNotEmpty() || pendingMessages.isEmpty()) return
+        val batch = pendingMessages.toList()
         val connection = connectionStore.load()
         if (connection == null) {
-            next.state.text = "Verbindung erforderlich"
-            next.steerButton.visibility = View.GONE
-            showInlineStatus("Hermes-Verbindung bitte in der App einrichten")
+            batch.forEach { pending ->
+                pending.state.text = "Verbindung erforderlich"
+                pending.steerButton.visibility = View.GONE
+            }
+            if (!uiDismissed) showInlineStatus("Hermes-Verbindung bitte in der App einrichten")
             return
         }
-        submitToHermes(next.text, connection, next.spoken, queuedMessage = next)
+        pendingMessages.clear()
+        persistPendingMessages()
+        val combinedText = batch.joinToString(separator = "\n") { pending -> "- ${pending.text}" }
+        submitToHermes(
+            combinedText,
+            connection,
+            spoken = batch.all { it.spoken },
+            queuedMessages = batch
+        )
     }
 
     private fun steerPendingMessage(pending: PendingMessage) {
+        if (activeRunId == null || !submitted || pending == steeringPending || pendingSteers.contains(pending)) return
+        pending.state.text = "Steer wartet …"
+        pending.steerButton.isEnabled = false
+        pendingSteers.addLast(pending)
+        processNextPendingSteer()
+    }
+
+    private fun processNextPendingSteer() {
+        if (steeringPending != null || pendingSteers.isEmpty()) return
+        val pending = pendingSteers.removeFirst()
         val runId = activeRunId
         val connection = connectionStore.load()
-        if (runId == null || connection == null || !submitted || steeringPending != null) return
+        if (runId == null || connection == null || !submitted) {
+            pending.state.text = "Wartet"
+            pending.steerButton.isEnabled = true
+            pendingSteers.forEach { queued ->
+                queued.state.text = "Wartet"
+                queued.steerButton.isEnabled = true
+            }
+            pendingSteers.clear()
+            if (!submitted) submitPendingBatch()
+            return
+        }
         steeringPending = pending
         pending.state.text = "Wird als Hinweis ergänzt …"
-        pending.steerButton.isEnabled = false
         HermesRunClient(connection).steer(runId, pending.text) { accepted, message ->
-            postToUi {
+            postToMain {
                 steeringPending = null
                 if (accepted) {
                     pendingMessages.remove(pending)
+                    persistPendingMessages()
                     pending.state.text = message
                     pending.steerButton.visibility = View.GONE
                 } else {
                     pending.state.text = "Wartet"
                     pending.steerButton.isEnabled = true
                 }
-                if (!submitted) startNextQueuedMessage()
+                processNextPendingSteer()
+                if (!submitted && steeringPending == null && pendingSteers.isEmpty()) submitPendingBatch()
             }
+        }
+    }
+
+    private fun persistPendingMessages() {
+        val serialized = JSONArray()
+        pendingMessages.forEach { pending ->
+            serialized.put(JSONObject().apply {
+                put("text", pending.text)
+                put("spoken", pending.spoken)
+            })
+        }
+        queuePreferences.edit().putString(PENDING_QUEUE_KEY, serialized.toString()).apply()
+    }
+
+    private fun restorePendingMessages() {
+        if (pendingMessages.isNotEmpty()) return
+        val raw = queuePreferences.getString(PENDING_QUEUE_KEY, null) ?: return
+        val restored = try {
+            JSONArray(raw)
+        } catch (_: Exception) {
+            queuePreferences.edit().remove(PENDING_QUEUE_KEY).apply()
+            return
+        }
+        for (index in 0 until restored.length()) {
+            val item = restored.optJSONObject(index) ?: continue
+            val text = item.optString("text").trim()
+            if (text.isEmpty()) continue
+            val spoken = item.optBoolean("spoken", false)
+            val bubble = addUserBubble(text, spoken, queued = true) ?: continue
+            val pending = PendingMessage(text, spoken, bubble.state, bubble.steerButton)
+            bubble.steerButton.setOnClickListener { steerPendingMessage(pending) }
+            pendingMessages.addLast(pending)
+        }
+        if (pendingMessages.isNotEmpty()) {
+            Log.i(RECOGNITION_LOG_TAG, "queue-restored:count=${pendingMessages.size}")
+            scrollMessagesToBottom()
         }
     }
 
@@ -1194,6 +1278,10 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         context.mainExecutor.execute {
             if (!uiDismissed) block()
         }
+    }
+
+    private fun postToMain(block: () -> Unit) {
+        context.mainExecutor.execute(block)
     }
 
     private fun speakFinal(text: String) {

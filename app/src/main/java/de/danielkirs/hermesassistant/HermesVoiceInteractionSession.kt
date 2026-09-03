@@ -4,12 +4,18 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.service.voice.VoiceInteractionSession
 import android.speech.RecognitionListener
@@ -80,6 +86,11 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private var recognitionGeneration = 0
     private var recognitionActive = false
     private var recognitionRestartPending = false
+    private var injectedAudioAllowedForTurn = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    private var audioRecord: AudioRecord? = null
+    private var audioPipeRead: ParcelFileDescriptor? = null
+    private var audioPipeOutput: ParcelFileDescriptor.AutoCloseOutputStream? = null
+    private var audioCaptureThread: Thread? = null
     private var keyboardHeightPx = 0
     private var sheetKeyboardOffsetPx = 0
     private var desiredChatHeightPx = 0
@@ -110,6 +121,8 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
 
     private companion object {
         const val RECOGNITION_LOG_TAG = "HermesSpeech"
+        const val AUDIO_SAMPLE_RATE_HZ = 16_000
+        const val AUDIO_CHUNK_BYTES = 3_200
     }
 
     init {
@@ -394,6 +407,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
     private fun stopRecognition() {
         recognitionActive = false
         recognitionGeneration += 1
+        stopInjectedAudioCapture()
         speechRecognizer?.let { recognizer ->
             try { recognizer.cancel() } catch (_: Exception) { }
             try { recognizer.destroy() } catch (_: Exception) { }
@@ -420,6 +434,7 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         recognitionRestartPending = false
         if (!continueInitialWindow) {
             initialListeningDeadlineMs = SystemClock.elapsedRealtime() + 10_000L
+            injectedAudioAllowedForTurn = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
         }
         val connection = connectionStore.load()
         when {
@@ -446,8 +461,14 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
         stopRecognition()
         recognitionStartedAtMs = SystemClock.elapsedRealtime()
         val generation = ++recognitionGeneration
+        val injectedAudioSource = if (injectedAudioAllowedForTurn) {
+            startInjectedAudioCapture(generation)
+        } else {
+            null
+        }
+        val usingInjectedAudio = injectedAudioSource != null
         var speechStarted = false
-        traceRecognition("start")
+        traceRecognition("start:audioSource=${if (usingInjectedAudio) "buffered" else "recognizer-mic"}")
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
@@ -504,6 +525,12 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                         error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
                     if ((error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) && lastPartialText.isNotBlank()) {
                         acceptRecognizedText(lastPartialText, activeConnection)
+                    } else if (usingInjectedAudio &&
+                        lastPartialText.isBlank() &&
+                        (error == SpeechRecognizer.ERROR_AUDIO || error == SpeechRecognizer.ERROR_CLIENT)
+                    ) {
+                        injectedAudioAllowedForTurn = false
+                        retryRecognitionWithinWindow("buffered-audio-fallback:${recognitionErrorName(error)}")
                     } else if (retryableInitialError && retryRecognitionWithinWindow(recognitionErrorName(error))) {
                         // Retry scheduled within the still-active initial listening window.
                     } else {
@@ -518,9 +545,106 @@ class HermesVoiceInteractionSession(context: Context) : VoiceInteractionSession(
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.GERMAN.toLanguageTag())
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200)
+                if (injectedAudioSource != null) {
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, injectedAudioSource)
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                    putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, AUDIO_SAMPLE_RATE_HZ)
+                }
             })
         }
         recognitionActive = true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startInjectedAudioCapture(generation: Int): ParcelFileDescriptor? {
+        val minimumBuffer = AudioRecord.getMinBufferSize(
+            AUDIO_SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minimumBuffer <= 0) return null
+
+        var record: AudioRecord? = null
+        var readPipe: ParcelFileDescriptor? = null
+        var output: ParcelFileDescriptor.AutoCloseOutputStream? = null
+        return try {
+            record = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                AUDIO_SAMPLE_RATE_HZ,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minimumBuffer * 2, AUDIO_CHUNK_BYTES * 2)
+            )
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                return null
+            }
+            val pipes = ParcelFileDescriptor.createPipe()
+            readPipe = pipes[0]
+            output = ParcelFileDescriptor.AutoCloseOutputStream(pipes[1])
+            audioRecord = record
+            audioPipeRead = readPipe
+            audioPipeOutput = output
+            record.startRecording()
+            val captureRecord = record
+            val captureOutput = output
+            audioCaptureThread = Thread({
+                val buffer = ByteArray(AUDIO_CHUNK_BYTES)
+                try {
+                    while (!Thread.currentThread().isInterrupted && generation == recognitionGeneration) {
+                        val count = captureRecord.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                        if (count <= 0) break
+                        captureOutput.write(buffer, 0, count)
+                        val level = pcmLevel(buffer, count)
+                        postToUi {
+                            if (generation == recognitionGeneration) waveform.setLevel(level)
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Closing the pipe or AudioRecord is the normal way to stop this blocking loop.
+                }
+            }, "HermesSpeechAudio").apply { start() }
+            readPipe
+        } catch (error: Exception) {
+            Log.w(RECOGNITION_LOG_TAG, "buffered audio unavailable; using recognizer microphone", error)
+            try { output?.close() } catch (_: Exception) { }
+            try { readPipe?.close() } catch (_: Exception) { }
+            try { record?.release() } catch (_: Exception) { }
+            audioRecord = null
+            audioPipeRead = null
+            audioPipeOutput = null
+            audioCaptureThread = null
+            null
+        }
+    }
+
+    private fun stopInjectedAudioCapture() {
+        val record = audioRecord
+        audioRecord = null
+        try { record?.stop() } catch (_: Exception) { }
+        try { audioPipeOutput?.close() } catch (_: Exception) { }
+        audioPipeOutput = null
+        try { audioPipeRead?.close() } catch (_: Exception) { }
+        audioPipeRead = null
+        audioCaptureThread?.interrupt()
+        audioCaptureThread = null
+        try { record?.release() } catch (_: Exception) { }
+    }
+
+    private fun pcmLevel(buffer: ByteArray, count: Int): Float {
+        var sumSquares = 0.0
+        var samples = 0
+        var index = 0
+        while (index + 1 < count) {
+            val sample = ((buffer[index + 1].toInt() shl 8) or (buffer[index].toInt() and 0xff)).toShort().toInt()
+            sumSquares += sample.toDouble() * sample.toDouble()
+            samples += 1
+            index += 2
+        }
+        if (samples == 0) return 0f
+        val rms = kotlin.math.sqrt(sumSquares / samples) / Short.MAX_VALUE
+        return (rms * 8.0).toFloat().coerceIn(0f, 1f)
     }
 
     private fun acceptRecognizedText(text: String, connection: HermesConnection) {

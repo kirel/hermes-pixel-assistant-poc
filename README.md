@@ -8,6 +8,7 @@ A native Kotlin Android client for a personal [Hermes Agent](https://github.com/
 
 - Android `ROLE_ASSISTANT`, `VoiceInteractionService`, and a bottom-anchored assistant overlay
 - Android/GMS `SpeechRecognizer` with live partial transcription and waveform animation
+- Buffered PCM handoff on Android 13+ so speech beginning immediately with the assistant gesture is not lost while the recognition service binds
 - A fallback for recognizers that emit a usable partial result followed by `ERROR_NO_MATCH`
 - Hermes Runs API client: `POST /v1/runs` plus SSE consumption from `/v1/runs/{run_id}/events`
 - Streaming response text and final Android `TextToSpeech` output

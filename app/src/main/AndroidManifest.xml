@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
-        android:label="Hermes Assistant POC"
+        android:label="Hermes Pixel Assistant"
         android:theme="@style/Theme.HermesAssistant">
 
         <activity
@@ -25,7 +25,7 @@
         <service
             android:name=".HermesVoiceInteractionService"
             android:exported="true"
-            android:label="Hermes Assistant POC"
+            android:label="Hermes Pixel Assistant"
             android:permission="android.permission.BIND_VOICE_INTERACTION">
             <intent-filter>
                 <action android:name="android.service.voice.VoiceInteractionService" />
@@ -46,7 +46,8 @@
 
         <service
             android:name=".HermesRecognitionService"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION">
             <intent-filter>
                 <action android:name="android.speech.RecognitionService" />
             </intent-filter>

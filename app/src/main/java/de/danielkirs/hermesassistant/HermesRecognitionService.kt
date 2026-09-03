@@ -5,9 +5,9 @@ import android.speech.RecognitionService
 import android.speech.SpeechRecognizer
 
 /**
- * Required Android recognition-service declaration for a complete
- * VoiceInteractionService. Speech recognition is intentionally out of scope
- * for this POC; assistant invocation always returns OK without listening.
+ * Recognition-service declaration required by the Android assistant role.
+ * Interactive turns use the platform SpeechRecognizer from
+ * HermesVoiceInteractionSession; direct binds are rejected explicitly.
  */
 class HermesRecognitionService : RecognitionService() {
     override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {

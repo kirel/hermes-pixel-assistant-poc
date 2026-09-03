@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Hermes Pixel Assistant POC"
+rootProject.name = "Hermes Pixel Assistant"
 include(":app")

@@ -1,8 +1,8 @@
-# Hermes Pixel Assistant POC
+# Hermes Pixel Assistant
 
-A native Kotlin Android proof of concept for a personal [Hermes Agent](https://github.com/NousResearch/hermes-agent) voice client. It can be selected as Android's default digital assistant and uses the platform speech services plus Hermes' Runs API.
+A native Kotlin Android client for a personal [Hermes Agent](https://github.com/NousResearch/hermes-agent). It can be selected as Android's default digital assistant and uses the platform speech services plus Hermes' Runs API.
 
-> **Status:** Experimental, debug-signed POC. It is intended for a private Tailnet deployment, not a public production service.
+> **Status:** Experimental and debug-signed. It is intended for a private Tailnet deployment, not a public production service.
 
 ## What works
 
@@ -54,7 +54,7 @@ app/build/outputs/apk/debug/app-debug.apk
 ## Install and test
 
 1. Install the debug APK on an Android device running API 29 or newer.
-2. Open **Hermes Assistant POC**.
+2. Open **Hermes Pixel Assistant**.
 3. Allow microphone access.
 4. Enter the private Tailnet hostname/IP, port, and Hermes API bearer token.
 5. Select **Save and test connection**.
@@ -65,7 +65,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 - The microphone transcript is sent to the configured Hermes API Server only after Android speech recognition completes.
 - The API key is encrypted at rest with Android Keystore; it is not shipped in the APK or logged by the app.
-- HTTP is allowed only for the intended encrypted Tailnet transport design. Do not expose such an endpoint publicly.
+- Cleartext HTTP is currently permitted so the app can reach a private Hermes endpoint over Tailscale. Transport confidentiality therefore relies on the Tailnet; do not use this configuration for a public endpoint.
 - The current implementation does not request screen context.
 
 ## Next steps

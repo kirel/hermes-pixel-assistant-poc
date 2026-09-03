@@ -48,7 +48,7 @@ class MainActivity : Activity() {
         }
 
         content.addView(TextView(this).apply {
-            text = "Hermes Assistant POC"
+            text = "Hermes Pixel Assistant"
             textSize = 26f
         })
         content.addView(TextView(this).apply {

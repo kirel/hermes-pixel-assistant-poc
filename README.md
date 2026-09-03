@@ -17,6 +17,7 @@ A native Kotlin Android client for a personal [Hermes Agent](https://github.com/
 - First-run configuration for Tailnet host, port, and bearer API key
 - API key storage encrypted with an Android Keystore AES-GCM key
 - Dismiss with a downward swipe or a tap outside the widget; an already accepted Hermes run is deliberately not cancelled
+- Reinvoking the system assistant while the sheet is visible restarts voice input in place instead of resetting the conversation
 
 ## Architecture
 
